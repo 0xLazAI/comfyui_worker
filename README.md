@@ -17,9 +17,9 @@
 
 - 任务状态落 PostgreSQL
 - API 进程只负责持久化并入 Redis 队列
-- queue worker 异步执行真正的 render
-- provider 目前接 Stephen 平台异步 render API
-- 最终图片上传到 S3 / Object Storage，结果只回 `assets://renders/...`
+- queue worker 异步执行具体 task
+- `render_panel` 走 Stephen 平台异步 render API，结果资产写到 `assets://renders/...`
+- `blender` 走 `pai-blender-api`，产物资产写到 `assets://blender/...`
 
 ## Task Contract
 
@@ -183,6 +183,8 @@ const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
   - `number`
   - `integer`
   - `boolean`
+  - `object`
+  - `json`
 - `required=true` 表示不传就报错
 - `default` 表示缺省时自动补齐
 - `allow_unknown_fields=false` 表示 payload 里不能出现未声明字段
