@@ -12,6 +12,7 @@
     "queue:worker": "npm run compile && node ./dist/queue/worker-cli.js"
   },
   "dependencies": {
+    "@openai/codex-sdk": "0.138.0",
     "@aws-sdk/client-s3": "^3.921.0",
     "cls-rtracer": "^2.6.3",
     "cors": "^2.8.5",
