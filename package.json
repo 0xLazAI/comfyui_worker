@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.921.0",
-    "@types/multer": "^2.1.0",
     "cls-rtracer": "^2.6.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
@@ -28,6 +27,7 @@
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.5",
+    "@types/multer": "^2.1.0",
     "@types/node": "^24.9.0",
     "@types/pg": "^8.15.5",
     "vitest": "^4.1.8",
