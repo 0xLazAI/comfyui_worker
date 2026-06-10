@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/comfyui-worker}"
-REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-/etc/comfyui-worker/.env}"
+REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-${APP_DIR}/.env}"
 WEBDAV_URL="${PAI_WEBDAV_URL:?PAI_WEBDAV_URL is required}"
 WEBDAV_USERNAME="${PAI_WEBDAV_USERNAME:?PAI_WEBDAV_USERNAME is required}"
 WEBDAV_PASSWORD="${PAI_WEBDAV_PASSWORD:?PAI_WEBDAV_PASSWORD is required}"
@@ -14,10 +14,13 @@ DAVFS_SECRETS_FILE="/etc/davfs2/secrets"
 DAVFS_CONF_FILE="/etc/davfs2/davfs2.conf"
 NODESOURCE_KEYRING="/etc/apt/keyrings/nodesource.gpg"
 NODESOURCE_LIST="/etc/apt/sources.list.d/nodesource.list"
+SUPERVISOR_SERVICE_NAME="supervisor.service"
 SERVER_SERVICE_NAME="comfyui-worker-server.service"
 CONSUMER_SERVICE_NAME="comfyui-worker-consumer.service"
-SERVER_SERVICE_TEMPLATE="${APP_DIR}/deploy/droplet/comfyui-worker-server.service"
-CONSUMER_SERVICE_TEMPLATE="${APP_DIR}/deploy/droplet/comfyui-worker-consumer.service"
+SUPERVISOR_CONFIG_TEMPLATE="${APP_DIR}/deploy/droplet/comfyui-worker.supervisor.conf"
+SUPERVISOR_CONFIG_PATH="/etc/supervisor/conf.d/comfyui-worker.conf"
+SUPERVISOR_OVERRIDE_DIR="/etc/systemd/system/${SUPERVISOR_SERVICE_NAME}.d"
+SUPERVISOR_OVERRIDE_FILE="${SUPERVISOR_OVERRIDE_DIR}/override.conf"
 FSTAB_WEBDAV_LINE="${WEBDAV_URL} ${WEBDAV_MOUNT_POINT} davfs _netdev,nofail,uid=0,gid=0,dir_mode=0775,file_mode=0664 0 0"
 FSTAB_BIND_LINE="${WEBDAV_MOUNT_POINT} ${DATA_PROJECTS_ROOT} none bind,nofail 0 0"
 
@@ -56,7 +59,8 @@ ensure_apt_packages \
   curl \
   davfs2 \
   git \
-  gnupg
+  gnupg \
+  supervisor
 
 mkdir -p /etc/apt/keyrings
 if [[ ! -f "${NODESOURCE_KEYRING}" ]]; then
@@ -131,11 +135,6 @@ if [[ ! -f "${REMOTE_ENV_FILE}" ]]; then
   exit 1
 fi
 
-LEGACY_ENV_FILE="${APP_DIR}/.env"
-if [[ "${REMOTE_ENV_FILE}" != "${LEGACY_ENV_FILE}" && -f "${LEGACY_ENV_FILE}" ]]; then
-  rm -f "${LEGACY_ENV_FILE}"
-fi
-
 upsert_env_value() {
   local key="$1"
   local value="$2"
@@ -159,21 +158,25 @@ cd "${APP_DIR}"
 npm ci
 npm run compile
 
-install_systemd_service() {
-  local template_path="$1"
-  local target_path="$2"
+sed \
+  -e "s|@APP_DIR@|${APP_DIR}|g" \
+  "${SUPERVISOR_CONFIG_TEMPLATE}" > "${SUPERVISOR_CONFIG_PATH}"
 
-  sed \
-    -e "s|@APP_DIR@|${APP_DIR}|g" \
-    -e "s|@ENV_FILE@|${REMOTE_ENV_FILE}|g" \
-    -e "s|@DATA_PROJECTS_ROOT@|${DATA_PROJECTS_ROOT}|g" \
-    "${template_path}" > "${target_path}"
-}
+mkdir -p "${SUPERVISOR_OVERRIDE_DIR}"
+cat > "${SUPERVISOR_OVERRIDE_FILE}" <<EOF
+[Unit]
+After=remote-fs.target network-online.target
+Wants=network-online.target
+RequiresMountsFor=${DATA_PROJECTS_ROOT}
+EOF
 
-install_systemd_service "${SERVER_SERVICE_TEMPLATE}" "/etc/systemd/system/${SERVER_SERVICE_NAME}"
-install_systemd_service "${CONSUMER_SERVICE_TEMPLATE}" "/etc/systemd/system/${CONSUMER_SERVICE_NAME}"
-
+systemctl disable --now "${SERVER_SERVICE_NAME}" "${CONSUMER_SERVICE_NAME}" >/dev/null 2>&1 || true
+rm -f "/etc/systemd/system/${SERVER_SERVICE_NAME}" "/etc/systemd/system/${CONSUMER_SERVICE_NAME}"
 systemctl daemon-reload
-systemctl enable "${SERVER_SERVICE_NAME}" "${CONSUMER_SERVICE_NAME}"
-systemctl restart "${SERVER_SERVICE_NAME}" "${CONSUMER_SERVICE_NAME}"
-systemctl --no-pager --full status "${SERVER_SERVICE_NAME}" "${CONSUMER_SERVICE_NAME}" || true
+
+systemctl enable --now "${SUPERVISOR_SERVICE_NAME}"
+supervisorctl reread
+supervisorctl update
+supervisorctl restart comfyui-worker-server comfyui-worker-consumer
+supervisorctl status
+systemctl --no-pager --full status "${SUPERVISOR_SERVICE_NAME}" || true
