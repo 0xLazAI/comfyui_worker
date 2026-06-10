@@ -15,8 +15,8 @@ DEPLOY_TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
 APP_DIR="${APP_DIR:-/opt/comfyui-worker}"
 REPO_URL="${REPO_URL:-$(git -C "${REPO_ROOT}" remote get-url origin)}"
 DEPLOY_REF="${DEPLOY_REF:-main}"
-LOCAL_ENV_FILE="${LOCAL_ENV_FILE:-${REPO_ROOT}/.env}"
-REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-/etc/comfyui-worker/.env}"
+LOCAL_ENV_FILE="${LOCAL_ENV_FILE:-${REPO_ROOT}/.env.prod}"
+REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-${APP_DIR}/.env}"
 REMOTE_ENV_DIR="$(dirname "${REMOTE_ENV_FILE}")"
 
 if [[ ! -f "${LOCAL_ENV_FILE}" ]]; then
