@@ -17,6 +17,7 @@ export type WorkerTaskEventType =
   | 'accepted'
   | 'enqueued'
   | 'started'
+  | 'agent_generated'
   | 'provider_submitted'
   | 'provider_polled'
   | 'asset_uploaded'

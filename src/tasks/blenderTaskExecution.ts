@@ -1,33 +1,23 @@
 import os from 'os';
-import { BLENDER_CONSUMER_KEY, handleBlenderExecute } from './blenderTaskExecution.js';
-import { logger } from '../infra/logger.js';
-import { downloadAsset, uploadRenderAsset } from '../render/assetStore.js';
-import { TaskRejectedError } from '../render/errors.js';
-import { hydrateRenderPanelPayload, type NormalizedRenderPanelPayload } from '../render/payload.js';
+import { generateBlenderScript } from '../blender/agent.js';
 import {
-  downloadStephenRenderImage,
-  pollStephenRenderUntilTerminal,
-  submitStephenRender,
-  type StephenRenderStatus,
-} from '../render/stephenRenderClient.js';
-import { writeStoryboardOutputSidecar } from '../render/storyboardOutputs.js';
+  downloadBlenderRunArtifact,
+  pollBlenderRunUntilTerminal,
+  submitBlenderRun,
+  type BlenderApiArtifactMetadata,
+  type BlenderApiRunStatus,
+} from '../blender/blenderApiClient.js';
+import { WORKER_NAME } from '../infra/constants.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
-import { readTaskDefinitionBinding } from '../taskDefinitions/definitionSchema.js';
+import { downloadAsset, uploadWorkerAsset } from '../render/assetStore.js';
+import { TaskRejectedError } from '../render/errors.js';
+import { hydrateBlenderTaskPayload } from '../blender/payload.js';
 import { taskStore } from './taskStore.js';
 import { isTerminalWorkerTaskStatus, utcNow } from './types.js';
-import { WORKER_NAME } from '../infra/constants.js';
 
-const RENDER_PANEL_CONSUMER_KEY = 'render_panel_consumer';
+export const BLENDER_CONSUMER_KEY = 'blender_consumer';
 
-function computeRetryDelaySeconds(backoffSeconds: number[], attemptNo: number): number {
-  if (!backoffSeconds.length) {
-    return 0;
-  }
-  const index = Math.max(0, attemptNo - 1);
-  return backoffSeconds[index] ?? backoffSeconds[backoffSeconds.length - 1] ?? 0;
-}
-
-export async function handleRenderPanelExecute(
+export async function handleBlenderExecute(
   envelope: QueueJobEnvelope<{ taskId: string }>,
   context: QueueHandlerContext,
 ): Promise<void> {
@@ -66,17 +56,18 @@ export async function handleRenderPanelExecute(
     return;
   }
 
-  const payload = hydrateRenderPanelPayload(structuredClone(record.requestPayload), {
+  const payload = hydrateBlenderTaskPayload(structuredClone(record.requestPayload), {
     taskId,
     projectId: record.projectId,
     projectRoot: extractProjectRoot(record.requestPayload),
   });
+
   await taskStore.save({
     ...record,
     status: 'running',
     progress: 0,
     eta: null,
-    message: 'resolving source image',
+    message: 'generating blender script',
     errorCode: null,
     queuePublishError: null,
     currentAttempt: context.attempts,
@@ -90,22 +81,55 @@ export async function handleRenderPanelExecute(
     eventType: 'started',
     attemptNo: context.attempts,
     workerName,
-    message: 'render_panel execution started',
+    message: 'blender execution started',
   });
 
   try {
-    const sourceImage = await downloadSourceImage(payload);
-    logger.info('task=%s source asset downloaded uri=%s bytes=%d', taskId, sourceImage.assetUri, sourceImage.buffer.byteLength);
-
-    const submitted = await submitStephenRender(
-      payload,
-      payload.workflow,
-      sourceImage.buffer.toString('base64'),
-    );
+    const referenceImage = await downloadReferenceImage(payload.projectId, payload.inputs.sourceImageAssetUri);
+    const generatedScript = await generateBlenderScript(payload, {
+      workingDirectory: payload.projectRoot,
+      sourceImagePath: null,
+    });
     await taskStore.save({
       ...(await expectTask(taskId)),
       status: 'running',
-      progress: 15,
+      progress: 20,
+      eta: null,
+      message: 'submitting blender run',
+      errorCode: null,
+      currentAttempt: context.attempts,
+      workerName,
+      updatedAt: utcNow(),
+    });
+    await taskStore.appendEvent({
+      taskId,
+      eventType: 'agent_generated',
+      attemptNo: context.attempts,
+      workerName,
+      message: 'blender script generated',
+      detailJson: {
+        provider: generatedScript.provider,
+        summary: generatedScript.summary,
+        threadId: generatedScript.threadId || null,
+      },
+    });
+
+    const modelId = resolveModelId(payload.taskId, payload.modelId);
+    const submitted = await submitBlenderRun({
+      task_id: payload.taskId,
+      workflow: payload.workflow.id,
+      project_id: payload.projectId,
+      scene_id: payload.sceneId,
+      shot_id: payload.shotId,
+      model_id: modelId,
+      pace: payload.pace,
+      script: generatedScript.script,
+      ...(referenceImage ? { reference_image: referenceImage } : {}),
+    });
+    await taskStore.save({
+      ...(await expectTask(taskId)),
+      status: 'running',
+      progress: 35,
       eta: null,
       message: 'provider submitted',
       errorCode: null,
@@ -118,17 +142,18 @@ export async function handleRenderPanelExecute(
       eventType: 'provider_submitted',
       attemptNo: context.attempts,
       workerName,
-      message: 'Stephen render submitted',
+      message: 'blender run submitted',
       detailJson: {
-        providerJobId: submitted.job_id,
+        runId: submitted.run_id,
         status: submitted.status,
-        statusUrl: submitted.status_url,
-        workflow: payload.workflow.providerWorkflowId,
+        statusUrl: submitted.status_url || null,
+        workflow: payload.workflow.id,
+        modelId,
       },
     });
 
     let lastProviderStatus = String(submitted.status || '').trim();
-    const terminalStatus = await pollStephenRenderUntilTerminal(payload, submitted, async (status) => {
+    const terminalStatus = await pollBlenderRunUntilTerminal(submitted, async (status) => {
       const normalizedStatus = String(status.status || '').trim();
       if (!normalizedStatus || normalizedStatus === lastProviderStatus) {
         return;
@@ -137,7 +162,7 @@ export async function handleRenderPanelExecute(
 
       await taskStore.save({
         ...(await expectTask(taskId)),
-        status: normalizedStatus === 'done' ? 'running' : 'running',
+        status: 'running',
         progress: progressForProviderStatus(normalizedStatus),
         eta: null,
         message: `provider ${normalizedStatus}`,
@@ -151,12 +176,11 @@ export async function handleRenderPanelExecute(
         eventType: 'provider_polled',
         attemptNo: context.attempts,
         workerName,
-        message: `Stephen render status changed to ${normalizedStatus}`,
+        message: `blender run status changed to ${normalizedStatus}`,
         detailJson: {
-          providerJobId: status.job_id,
+          runId: status.run_id,
           status: normalizedStatus,
-          renderUrl: status.render_url || null,
-          filename: status.filename || null,
+          modelId: status.model_id || modelId,
         },
       });
     });
@@ -164,93 +188,22 @@ export async function handleRenderPanelExecute(
     await taskStore.save({
       ...(await expectTask(taskId)),
       status: 'running',
-      progress: 70,
+      progress: 75,
       eta: null,
-      message: 'downloading provider result',
+      message: 'uploading blender artifacts',
       errorCode: null,
       currentAttempt: context.attempts,
       workerName,
       updatedAt: utcNow(),
     });
 
-    const renderedImage = await downloadStephenRenderImage(terminalStatus);
-    const uploadedAsset = await uploadRenderAsset(payload.projectId, {
-      buffer: renderedImage.buffer,
-      contentType: renderedImage.contentType,
-      filenameHint: renderedImage.filename,
-    });
-    await taskStore.appendEvent({
-      taskId,
-      eventType: 'asset_uploaded',
-      attemptNo: context.attempts,
-      workerName,
-      message: 'render asset uploaded',
-      detailJson: {
-        assetUri: uploadedAsset.assetUri,
-        filename: uploadedAsset.filename,
-        bytes: uploadedAsset.bytes,
-      },
-    });
-
-    await taskStore.save({
-      ...(await expectTask(taskId)),
-      status: 'running',
-      progress: 90,
-      eta: null,
-      message: 'writing storyboard metadata',
-      errorCode: null,
-      currentAttempt: context.attempts,
-      workerName,
-      updatedAt: utcNow(),
-    });
-
-    await writeStoryboardOutputSidecar(payload, {
-      task_id: taskId,
-      task_type: 'render_panel',
-      workflow: payload.workflow.id,
-      render_uri: uploadedAsset.assetUri,
-      filename: uploadedAsset.filename,
-      seed: payload.seed,
-      source_image_uri: payload.inputs.imageAssetUri,
-      extra_params: payload.extraParams,
-      provider: {
-        name: 'stephen_render',
-        job_id: String(terminalStatus.job_id || ''),
-        workflow: payload.workflow.providerWorkflowId,
-      },
-      created_at: utcNow(),
-    }).catch((error: unknown) => {
-      if (error instanceof Error && error.message.includes('Shot storyboard directory is missing')) {
-        throw new TaskRejectedError(error.message, 'storyboard_target_missing');
-      }
-      throw error;
-    });
-    await taskStore.appendEvent({
-      taskId,
-      eventType: 'metadata_written',
-      attemptNo: context.attempts,
-      workerName,
-      message: 'storyboard outputs metadata written',
-      detailJson: {
-        panelId: payload.panel.panelId,
-        sceneId: payload.panel.sceneId,
-        shotId: payload.panel.shotId,
-      },
-    });
-
+    const artifacts = await uploadArtifacts(taskId, payload.projectId, terminalStatus, context.attempts, workerName);
     const result = {
-      panel_id: payload.panel.panelId,
-      project: payload.projectId,
       workflow: payload.workflow.id,
-      backend: payload.workflow.backend,
-      filename: uploadedAsset.filename,
-      render_uri: uploadedAsset.assetUri,
-      seed: payload.seed,
-      meta: {
-        providerJobId: terminalStatus.job_id,
-        providerWorkflow: payload.workflow.providerWorkflowId,
-        resolvedBaseModel: payload.workflow.baseModel,
-      },
+      model_id: terminalStatus.model_id || modelId,
+      run_id: terminalStatus.run_id,
+      runner_status: terminalStatus.status,
+      artifacts,
     };
 
     await taskStore.save({
@@ -271,10 +224,14 @@ export async function handleRenderPanelExecute(
       eventType: 'succeeded',
       attemptNo: context.attempts,
       workerName,
-      message: 'render_panel execution succeeded',
+      message: 'blender execution succeeded',
       detailJson: {
-        providerJobId: terminalStatus.job_id,
-        renderUri: uploadedAsset.assetUri,
+        runId: terminalStatus.run_id,
+        artifacts: artifacts.map((artifact) => ({
+          artifact_id: artifact.artifact_id,
+          asset_uri: artifact.asset_uri,
+          kind: artifact.kind,
+        })),
       },
     });
     await taskStore.saveAttempt({
@@ -311,7 +268,7 @@ export async function handleRenderPanelExecute(
           eventType: 'rejected',
           attemptNo: context.attempts,
           workerName,
-          message: 'render_panel execution rejected',
+          message: 'blender execution rejected',
           detailJson: {
             failure: failureDetail,
           },
@@ -343,8 +300,8 @@ export async function handleRenderPanelExecute(
         status: terminalFailure ? 'failed' : 'retry_waiting',
         progress: terminalFailure ? null : 0,
         eta: terminalFailure ? null : retryDelaySeconds,
-        message: error?.message || 'render_panel execution failed',
-        errorCode: 'render_panel_failed',
+        message: error?.message || 'blender execution failed',
+        errorCode: 'blender_failed',
         resultPayload: failureDetail,
         currentAttempt: context.attempts,
         nextRunAt: terminalFailure ? null : new Date(Date.now() + retryDelaySeconds * 1000).toISOString(),
@@ -358,7 +315,7 @@ export async function handleRenderPanelExecute(
           eventType: 'failed',
           attemptNo: context.attempts,
           workerName,
-          message: 'render_panel execution failed',
+          message: 'blender execution failed',
           detailJson: {
             failure: failureDetail,
           },
@@ -372,7 +329,7 @@ export async function handleRenderPanelExecute(
           finishedAt,
           durationMs: Date.now() - new Date(startedAt).getTime(),
           resultPayload: failureDetail,
-          errorMessage: error?.message || 'render_panel execution failed',
+          errorMessage: error?.message || 'blender execution failed',
         });
       } else {
         await taskStore.appendEvent({
@@ -380,7 +337,7 @@ export async function handleRenderPanelExecute(
           eventType: 'retry_scheduled',
           attemptNo: context.attempts,
           workerName,
-          message: 'render_panel scheduled for retry',
+          message: 'blender task scheduled for retry',
           detailJson: {
             retryDelaySeconds,
             failure: failureDetail,
@@ -395,7 +352,7 @@ export async function handleRenderPanelExecute(
           finishedAt,
           durationMs: Date.now() - new Date(startedAt).getTime(),
           resultPayload: failureDetail,
-          errorMessage: error?.message || 'render_panel execution failed',
+          errorMessage: error?.message || 'blender execution failed',
         });
       }
     }
@@ -403,36 +360,77 @@ export async function handleRenderPanelExecute(
   }
 }
 
-export async function handleTaskExecute(
-  envelope: QueueJobEnvelope<{ taskId: string }>,
-  context: QueueHandlerContext,
-): Promise<void> {
-  const taskId = String(envelope.body?.taskId || '').trim();
-  if (!taskId) {
-    throw new Error('taskId is required');
+async function downloadReferenceImage(projectId: string, assetUri: string | null) {
+  if (!assetUri) {
+    return null;
   }
 
-  const record = await taskStore.get(taskId);
-  if (!record) {
-    throw new Error(`Task not found: ${taskId}`);
-  }
-
-  const binding = readTaskDefinitionBinding(record.requestPayload);
-  const consumerKey = binding?.consumerKey || defaultConsumerKeyForTaskType(record.taskType);
-  const handler = getConsumerHandler(consumerKey);
-  await handler(envelope, context);
-}
-
-async function downloadSourceImage(payload: NormalizedRenderPanelPayload) {
   try {
-    return await downloadAsset(payload.projectId, payload.inputs.imageAssetUri || '');
+    const downloaded = await downloadAsset(projectId, assetUri);
+    return {
+      filename: downloaded.filename,
+      content_type: downloaded.contentType,
+      base64: downloaded.buffer.toString('base64'),
+    };
   } catch (error: any) {
     const message = String(error?.message || error || '');
     if (error?.name === 'NoSuchKey' || message.includes('NoSuchKey') || message.includes('The specified key does not exist')) {
-      throw new TaskRejectedError(`source image asset does not exist: ${payload.inputs.imageAssetUri}`, 'source_asset_missing');
+      throw new TaskRejectedError(`source image asset does not exist: ${assetUri}`, 'source_asset_missing');
     }
     throw error;
   }
+}
+
+async function uploadArtifacts(
+  taskId: string,
+  projectId: string,
+  terminalStatus: BlenderApiRunStatus,
+  attemptNo: number,
+  workerName: string,
+): Promise<Array<Record<string, unknown>>> {
+  const artifacts = Array.isArray(terminalStatus.artifacts) ? terminalStatus.artifacts : [];
+  const uploadedArtifacts: Array<Record<string, unknown>> = [];
+
+  for (const artifact of artifacts) {
+    const downloaded = await downloadBlenderRunArtifact(terminalStatus.run_id, artifact);
+    const uploaded = await uploadWorkerAsset(projectId, 'blender', {
+      buffer: downloaded.buffer,
+      contentType: downloaded.contentType,
+      filenameHint: downloaded.filename,
+    });
+    const detail = buildUploadedArtifactDetail(artifact, uploaded);
+    uploadedArtifacts.push(detail);
+
+    await taskStore.appendEvent({
+      taskId,
+      eventType: 'asset_uploaded',
+      attemptNo,
+      workerName,
+      message: `uploaded blender artifact ${artifact.artifact_id}`,
+      detailJson: detail,
+    });
+  }
+
+  return uploadedArtifacts;
+}
+
+function buildUploadedArtifactDetail(
+  artifact: BlenderApiArtifactMetadata,
+  uploaded: Awaited<ReturnType<typeof uploadWorkerAsset>>,
+): Record<string, unknown> {
+  return {
+    artifact_id: artifact.artifact_id,
+    kind: readArtifactKind(artifact),
+    filename: uploaded.filename,
+    content_type: uploaded.contentType,
+    bytes: uploaded.bytes,
+    asset_uri: uploaded.assetUri,
+  };
+}
+
+function readArtifactKind(artifact: BlenderApiArtifactMetadata): string | null {
+  const normalized = String(artifact.kind || artifact.type || '').trim();
+  return normalized || null;
 }
 
 async function expectTask(taskId: string) {
@@ -443,63 +441,40 @@ async function expectTask(taskId: string) {
   return record;
 }
 
+function computeRetryDelaySeconds(backoffSeconds: number[], attemptNo: number): number {
+  if (!backoffSeconds.length) {
+    return 0;
+  }
+  const index = Math.max(0, attemptNo - 1);
+  return backoffSeconds[index] ?? backoffSeconds[backoffSeconds.length - 1] ?? 0;
+}
+
 function progressForProviderStatus(status: string): number {
   switch (status) {
     case 'submitted':
-      return 20;
+      return 40;
     case 'queued':
-      return 25;
-    case 'running':
       return 45;
-    case 'done':
-      return 65;
+    case 'running':
+      return 60;
+    case 'succeeded':
+      return 70;
     default:
-      return 30;
+      return 50;
   }
+}
+
+function resolveModelId(taskId: string, payloadModelId: string | null): string {
+  if (payloadModelId) {
+    return payloadModelId;
+  }
+  const sanitizedTaskId = String(taskId || '').trim().replace(/[^a-z0-9_-]+/gi, '_');
+  return `model_${sanitizedTaskId || 'blender_task'}`;
 }
 
 function normalizeWorkerName(): string {
   const normalized = String(WORKER_NAME || '').trim();
   return normalized || `${os.hostname()}:${process.pid}`;
-}
-
-function buildTaskFailureDetail(error: unknown): Record<string, unknown> {
-  if (error instanceof TaskRejectedError) {
-    return {
-      errorName: error.name,
-      code: error.code,
-      message: error.message,
-    };
-  }
-
-  return {
-    errorName: error instanceof Error ? error.name : 'Error',
-    message: error instanceof Error ? error.message : String(error),
-  };
-}
-
-export function supportsConsumerKey(consumerKey: string): boolean {
-  return Boolean(CONSUMER_HANDLERS[String(consumerKey || '').trim()]);
-}
-
-function getConsumerHandler(consumerKey: string): typeof handleRenderPanelExecute {
-  const normalized = String(consumerKey || '').trim();
-  const handler = CONSUMER_HANDLERS[normalized];
-  if (!handler) {
-    throw new Error(`Unsupported consumer_key: ${normalized || '(empty)'}`);
-  }
-  return handler;
-}
-
-function defaultConsumerKeyForTaskType(taskType: string): string {
-  const normalized = String(taskType || '').trim();
-  if (normalized === 'render_panel') {
-    return RENDER_PANEL_CONSUMER_KEY;
-  }
-  if (normalized === 'blender') {
-    return BLENDER_CONSUMER_KEY;
-  }
-  return '';
 }
 
 function extractProjectRoot(requestPayload: Record<string, unknown>): string {
@@ -519,7 +494,17 @@ function extractProjectRoot(requestPayload: Record<string, unknown>): string {
   throw new Error('request payload is missing _taskRuntime.projectRoot');
 }
 
-const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
-  [BLENDER_CONSUMER_KEY]: handleBlenderExecute,
-  [RENDER_PANEL_CONSUMER_KEY]: handleRenderPanelExecute,
-};
+function buildTaskFailureDetail(error: unknown): Record<string, unknown> {
+  if (error instanceof TaskRejectedError) {
+    return {
+      errorName: error.name,
+      code: error.code,
+      message: error.message,
+    };
+  }
+
+  return {
+    errorName: error instanceof Error ? error.name : 'Error',
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
