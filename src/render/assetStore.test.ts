@@ -104,3 +104,35 @@ test.each([
     ContentType: 'image/png',
   });
 });
+
+test.each(['', '/foo', 'foo/bar', '../foo'])('uploadWorkerAsset rejects malformed asset group %j', async (group) => {
+  const { uploadWorkerAsset } = await loadAssetStore();
+
+  await expect(
+    uploadWorkerAsset('project-123', group, {
+      buffer: Buffer.from('asset-bytes'),
+      filenameHint: 'scene.blend',
+    }),
+  ).rejects.toThrow('asset group must be a non-empty slug');
+});
+
+test('uploadWorkerAsset keeps supported filename extension when explicit contentType differs', async () => {
+  const { uploadWorkerAsset } = await loadAssetStore();
+  const buffer = Buffer.from('asset-bytes');
+
+  const uploaded = await uploadWorkerAsset('project-123', 'blender-artifacts', {
+    buffer,
+    filenameHint: 'scene.blend',
+    contentType: 'image/png',
+  });
+
+  expect(uploaded.filename).toMatch(/^20260610-[A-Za-z0-9_-]+\.blend$/);
+  expect(uploaded.assetUri).toBe(`assets://blender-artifacts/${uploaded.filename}`);
+  expect(uploaded.contentType).toBe('image/png');
+
+  const [command] = sendMock.mock.calls[0] || [];
+  expect(command.input).toMatchObject({
+    Key: `projects/project-123/blender-artifacts/${uploaded.filename}`,
+    ContentType: 'image/png',
+  });
+});

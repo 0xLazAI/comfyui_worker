@@ -76,9 +76,10 @@ export async function uploadWorkerAsset(
     filenameHint?: string;
   },
 ): Promise<UploadedAsset> {
+  const normalizedGroup = normalizeAssetGroup(group);
   const extension = detectExtension(input.filenameHint, input.contentType);
   const filename = `${utcDateStamp()}-${randomBytes(4).toString('base64url')}.${extension}`;
-  const assetUri = `assets://${group}/${filename}`;
+  const assetUri = `assets://${normalizedGroup}/${filename}`;
   const key = buildObjectKey(projectId, assetUri);
   const contentType = input.contentType || guessContentTypeFromFilename(filename);
 
@@ -128,6 +129,14 @@ function normalizeAssetUri(assetUri: string): string {
   const normalized = String(assetUri || '').trim();
   if (!normalized.startsWith('assets://')) {
     throw new Error(`assetUri must start with assets://: ${normalized || '(empty)'}`);
+  }
+  return normalized;
+}
+
+function normalizeAssetGroup(group: string): string {
+  const normalized = String(group || '').trim();
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(normalized)) {
+    throw new Error('asset group must be a non-empty slug');
   }
   return normalized;
 }
