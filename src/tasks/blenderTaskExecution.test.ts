@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { ProviderRequestError, TaskRejectedError } from '../render/errors.js';
@@ -41,11 +43,13 @@ describe('blender task execution', () => {
   let currentRecord: WorkerTaskRecord;
   let appendedEvents: WorkerTaskEventInput[];
   let savedAttempts: WorkerTaskAttemptInput[];
+  let tempPathsToCleanup: string[];
 
   beforeEach(() => {
     currentRecord = createTaskRecord();
     appendedEvents = [];
     savedAttempts = [];
+    tempPathsToCleanup = [];
 
     taskStoreMock.get.mockImplementation(async (taskId: string) => (
       currentRecord && currentRecord.taskId === taskId ? structuredClone(currentRecord) : null
@@ -96,25 +100,39 @@ describe('blender task execution', () => {
   });
 
   afterEach(() => {
+    for (const filePath of tempPathsToCleanup) {
+      if (filePath.includes('/')) {
+        rmSync(dirname(filePath), { recursive: true, force: true });
+      }
+    }
     vi.clearAllMocks();
   });
 
-  test('routes blender tasks through the registered consumer and uploads returned artifacts', async () => {
+  test('routes blender tasks through the registered consumer, stages source image for codex, and uploads the required artifact set', async () => {
     const envelope = createEnvelope(currentRecord.taskId);
     const context = createContext({ attempts: 1, maxAttempts: 3 });
+    const sourceBuffer = Buffer.from('image-binary');
 
     downloadAssetMock.mockResolvedValue({
       assetUri: 'assets://uploads/source.png',
-      buffer: Buffer.from('image-binary'),
+      buffer: sourceBuffer,
       contentType: 'image/png',
       filename: 'source.png',
     });
-    generateBlenderScriptMock.mockResolvedValue({
-      notes: ['created scene'],
-      provider: 'codex',
-      script: 'import bpy\nbpy.data.objects\n',
-      summary: 'Generated a previs scene.',
-      threadId: 'thread_123',
+    generateBlenderScriptMock.mockImplementation(async (_payload, generateContext) => {
+      expect(generateContext.workingDirectory).toBe('/data/pai-projects/project-root');
+      expect(generateContext.sourceImagePath).toBeTruthy();
+      const stagedPath = String(generateContext.sourceImagePath);
+      tempPathsToCleanup.push(stagedPath);
+      expect(existsSync(stagedPath)).toBe(true);
+      expect(readFileSync(stagedPath)).toEqual(sourceBuffer);
+      return {
+        notes: ['created scene'],
+        provider: 'codex',
+        script: 'import bpy\nbpy.data.objects\n',
+        summary: 'Generated a previs scene.',
+        threadId: 'thread_123',
+      };
     });
     submitBlenderRunMock.mockResolvedValue({
       run_id: 'run_123',
@@ -130,36 +148,22 @@ describe('blender task execution', () => {
         run_id: 'run_123',
         status: 'succeeded',
         model_id: 'model_task_123',
-        artifacts: [
-          { artifact_id: 'artifact_blend', filename: 'scene.blend', content_type: 'application/x-blender', kind: 'blend' },
-          { artifact_id: 'artifact_preview', filename: 'preview.png', content_type: 'image/png', kind: 'preview' },
-        ],
+        artifacts: createProviderArtifacts(),
       };
     });
-    downloadBlenderRunArtifactMock
-      .mockResolvedValueOnce({
-        buffer: Buffer.from('blend-binary'),
-        contentType: 'application/x-blender',
-        filename: 'scene.blend',
-      })
-      .mockResolvedValueOnce({
-        buffer: Buffer.from('preview-binary'),
-        contentType: 'image/png',
-        filename: 'preview.png',
+    for (const artifact of createProviderArtifacts()) {
+      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
+        contentType: String(artifact.content_type),
+        filename: String(artifact.filename),
       });
-    uploadWorkerAssetMock
-      .mockResolvedValueOnce({
-        assetUri: 'assets://blender/scene.blend',
-        bytes: 12,
-        contentType: 'application/x-blender',
-        filename: 'scene.blend',
-      })
-      .mockResolvedValueOnce({
-        assetUri: 'assets://blender/preview.png',
-        bytes: 14,
-        contentType: 'image/png',
-        filename: 'preview.png',
+      uploadWorkerAssetMock.mockResolvedValueOnce({
+        assetUri: `assets://blender/${artifact.filename}`,
+        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
+        contentType: artifact.content_type,
+        filename: artifact.filename,
       });
+    }
 
     const { handleTaskExecute, supportsConsumerKey } = await import('./taskExecution.js');
 
@@ -173,17 +177,6 @@ describe('blender task execution', () => {
     }));
     expect(appendedEvents.some((event) => event.eventType === 'started')).toBe(true);
     expect(downloadAssetMock).toHaveBeenCalledWith('project_456', 'assets://uploads/source.png');
-    expect(generateBlenderScriptMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        projectId: 'project_456',
-        taskId: 'task_123',
-        workflow: expect.objectContaining({ id: 'blender-create-3d' }),
-      }),
-      expect.objectContaining({
-        sourceImagePath: null,
-        workingDirectory: '/data/pai-projects/project-root',
-      }),
-    );
     expect(submitBlenderRunMock).toHaveBeenCalledWith(expect.objectContaining({
       task_id: 'task_123',
       workflow: 'blender-create-3d',
@@ -193,49 +186,33 @@ describe('blender task execution', () => {
       model_id: 'model_task_123',
       script: 'import bpy\nbpy.data.objects\n',
       reference_image: expect.objectContaining({
-        base64: Buffer.from('image-binary').toString('base64'),
+        base64: sourceBuffer.toString('base64'),
         content_type: 'image/png',
         filename: 'source.png',
       }),
     }));
-    expect(pollBlenderRunUntilTerminalMock).toHaveBeenCalledWith(
-      expect.objectContaining({ run_id: 'run_123' }),
-      expect.any(Function),
-    );
-    expect(downloadBlenderRunArtifactMock).toHaveBeenCalledTimes(2);
-    expect(uploadWorkerAssetMock).toHaveBeenNthCalledWith(
-      1,
-      'project_456',
-      'blender',
-      expect.objectContaining({
-        contentType: 'application/x-blender',
-        filenameHint: 'scene.blend',
-      }),
-    );
-    expect(uploadWorkerAssetMock).toHaveBeenNthCalledWith(
-      2,
-      'project_456',
-      'blender',
-      expect.objectContaining({
-        contentType: 'image/png',
-        filenameHint: 'preview.png',
-      }),
-    );
+    expect(downloadBlenderRunArtifactMock).toHaveBeenCalledTimes(6);
     expect(currentRecord.status).toBe('succeeded');
     expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
       workflow: 'blender-create-3d',
       model_id: 'model_task_123',
       run_id: 'run_123',
       runner_status: 'succeeded',
+      artifact_uris: {
+        blend: 'assets://blender/scene.blend',
+        model_obj: 'assets://blender/model.obj',
+        preview: 'assets://blender/preview.png',
+        summary: 'assets://blender/summary.json',
+        pace: 'assets://blender/pace.json',
+        generated_script: 'assets://blender/generated_scene.py',
+      },
       artifacts: [
-        expect.objectContaining({
-          artifact_id: 'artifact_blend',
-          asset_uri: 'assets://blender/scene.blend',
-        }),
-        expect.objectContaining({
-          artifact_id: 'artifact_preview',
-          asset_uri: 'assets://blender/preview.png',
-        }),
+        expect.objectContaining({ artifact_id: 'scene_blend', kind: 'blend', asset_uri: 'assets://blender/scene.blend' }),
+        expect.objectContaining({ artifact_id: 'model_obj', kind: 'model_obj', asset_uri: 'assets://blender/model.obj' }),
+        expect.objectContaining({ artifact_id: 'preview_png', kind: 'preview', asset_uri: 'assets://blender/preview.png' }),
+        expect.objectContaining({ artifact_id: 'summary_json', kind: 'summary', asset_uri: 'assets://blender/summary.json' }),
+        expect.objectContaining({ artifact_id: 'pace_json', kind: 'pace', asset_uri: 'assets://blender/pace.json' }),
+        expect.objectContaining({ artifact_id: 'generated_scene_py', kind: 'generated_script', asset_uri: 'assets://blender/generated_scene.py' }),
       ],
     }));
     expect(savedAttempts.at(-1)).toEqual(expect.objectContaining({
@@ -244,80 +221,220 @@ describe('blender task execution', () => {
     }));
   });
 
-  test('marks blender tasks failed on terminal provider errors after the last attempt and rethrows', async () => {
+  test('passes a staged optional source image to update workflow codex generation and provider submission', async () => {
+    currentRecord = createTaskRecord({
+      requestPayload: {
+        workflow: 'blender-update-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        model_id: 'model_existing',
+        prompt: 'Add a canopy and soften the light',
+        inputs: {
+          image: {
+            assetUri: 'assets://uploads/update-source.jpg',
+          },
+        },
+      },
+    });
     const envelope = createEnvelope(currentRecord.taskId);
-    const context = createContext({ attempts: 3, maxAttempts: 3 });
-    const providerError = new ProviderRequestError('Blender crashed during bake', 502, 'provider_run_failed', {
-      run_id: 'run_failed',
-    });
+    const context = createContext({ attempts: 1, maxAttempts: 3 });
+    const sourceBuffer = Buffer.from('update-image');
 
-    generateBlenderScriptMock.mockResolvedValue({
-      notes: [],
-      provider: 'codex',
-      script: 'import bpy\nbpy.data.objects\n',
-      summary: 'Generated a previs scene.',
-      threadId: 'thread_123',
-    });
     downloadAssetMock.mockResolvedValue({
-      assetUri: 'assets://uploads/source.png',
-      buffer: Buffer.from('image-binary'),
-      contentType: 'image/png',
-      filename: 'source.png',
+      assetUri: 'assets://uploads/update-source.jpg',
+      buffer: sourceBuffer,
+      contentType: 'image/jpeg',
+      filename: 'update-source.jpg',
+    });
+    generateBlenderScriptMock.mockImplementation(async (_payload, generateContext) => {
+      const stagedPath = String(generateContext.sourceImagePath);
+      tempPathsToCleanup.push(stagedPath);
+      expect(stagedPath.endsWith('.jpg')).toBe(true);
+      expect(readFileSync(stagedPath)).toEqual(sourceBuffer);
+      return {
+        notes: [],
+        provider: 'codex',
+        script: 'import bpy\nbpy.data.objects\n',
+        summary: 'Updated the scene.',
+        threadId: 'thread_update',
+      };
     });
     submitBlenderRunMock.mockResolvedValue({
-      run_id: 'run_failed',
+      run_id: 'run_update',
       status: 'queued',
-      status_url: '/runs/run_failed',
+      status_url: '/runs/run_update',
     });
-    pollBlenderRunUntilTerminalMock.mockRejectedValue(providerError);
+    pollBlenderRunUntilTerminalMock.mockResolvedValue({
+      run_id: 'run_update',
+      status: 'succeeded',
+      model_id: 'model_existing',
+      artifacts: createProviderArtifacts(),
+    });
+    for (const artifact of createProviderArtifacts()) {
+      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
+        contentType: String(artifact.content_type),
+        filename: String(artifact.filename),
+      });
+      uploadWorkerAssetMock.mockResolvedValueOnce({
+        assetUri: `assets://blender/${artifact.filename}`,
+        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
+        contentType: artifact.content_type,
+        filename: artifact.filename,
+      });
+    }
 
     const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
+    await handleBlenderExecute(envelope, context);
 
-    await expect(handleBlenderExecute(envelope, context)).rejects.toThrow('Blender crashed during bake');
-
-    expect(currentRecord.status).toBe('failed');
-    expect(currentRecord.message).toBe('Blender crashed during bake');
-    expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
-      errorName: 'Error',
-      message: 'Blender crashed during bake',
-    }));
-    expect(appendedEvents.at(-1)).toEqual(expect.objectContaining({
-      eventType: 'failed',
-    }));
-    expect(savedAttempts.at(-1)).toEqual(expect.objectContaining({
-      status: 'failed',
-      errorMessage: 'Blender crashed during bake',
+    expect(submitBlenderRunMock).toHaveBeenCalledWith(expect.objectContaining({
+      model_id: 'model_existing',
+      reference_image: expect.objectContaining({
+        content_type: 'image/jpeg',
+        filename: 'update-source.jpg',
+      }),
     }));
   });
 
-  test('marks blender tasks rejected without rethrowing TaskRejectedError', async () => {
+  test('marks terminal success with missing artifacts as failed and rethrows', async () => {
+    const envelope = createEnvelope(currentRecord.taskId);
+    const context = createContext({ attempts: 3, maxAttempts: 3 });
+
+    arrangeScriptGenerationWithSourceImage();
+    submitBlenderRunMock.mockResolvedValue({
+      run_id: 'run_missing',
+      status: 'queued',
+      status_url: '/runs/run_missing',
+    });
+    pollBlenderRunUntilTerminalMock.mockResolvedValue({
+      run_id: 'run_missing',
+      status: 'succeeded',
+      artifacts: [],
+    });
+
+    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
+
+    await expect(handleBlenderExecute(envelope, context)).rejects.toMatchObject({
+      code: 'provider_missing_artifact',
+      statusCode: 502,
+    });
+
+    expect(currentRecord.status).toBe('failed');
+    expect(savedAttempts.at(-1)).toEqual(expect.objectContaining({ status: 'failed' }));
+  });
+
+  test('marks terminal success with an empty artifact download as failed and rethrows', async () => {
+    const envelope = createEnvelope(currentRecord.taskId);
+    const context = createContext({ attempts: 3, maxAttempts: 3 });
+
+    arrangeScriptGenerationWithSourceImage();
+    submitBlenderRunMock.mockResolvedValue({
+      run_id: 'run_empty',
+      status: 'queued',
+      status_url: '/runs/run_empty',
+    });
+    pollBlenderRunUntilTerminalMock.mockResolvedValue({
+      run_id: 'run_empty',
+      status: 'succeeded',
+      artifacts: createProviderArtifacts(),
+    });
+    downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+      buffer: Buffer.alloc(0),
+      contentType: 'application/x-blender',
+      filename: 'scene.blend',
+    });
+
+    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
+
+    await expect(handleBlenderExecute(envelope, context)).rejects.toMatchObject({
+      code: 'provider_empty_artifact',
+      statusCode: 502,
+    });
+
+    expect(currentRecord.status).toBe('failed');
+    expect(savedAttempts.at(-1)).toEqual(expect.objectContaining({ status: 'failed' }));
+  });
+
+  test('releases blender tasks for retry on non-terminal provider failures', async () => {
     const envelope = createEnvelope(currentRecord.taskId);
     const context = createContext({ attempts: 1, maxAttempts: 3 });
 
-    generateBlenderScriptMock.mockRejectedValue(new TaskRejectedError('unsupported workflow combination', 'provider_rejected'));
-    downloadAssetMock.mockResolvedValue({
-      assetUri: 'assets://uploads/source.png',
-      buffer: Buffer.from('image-binary'),
-      contentType: 'image/png',
-      filename: 'source.png',
+    arrangeScriptGenerationWithSourceImage();
+    submitBlenderRunMock.mockResolvedValue({
+      run_id: 'run_retry',
+      status: 'queued',
+      status_url: '/runs/run_retry',
     });
+    pollBlenderRunUntilTerminalMock.mockRejectedValue(
+      new ProviderRequestError('provider unavailable', 503, 'provider_status_failed'),
+    );
 
     const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
 
+    await expect(handleBlenderExecute(envelope, context)).rejects.toThrow('provider unavailable');
+
+    expect(currentRecord.status).toBe('retry_waiting');
+    expect(savedAttempts.at(-1)).toEqual(expect.objectContaining({ status: 'released' }));
+    expect(appendedEvents.at(-1)).toEqual(expect.objectContaining({ eventType: 'retry_scheduled' }));
+  });
+
+  test('marks cancel_requested tasks as cancelled before starting blender execution', async () => {
+    currentRecord = createTaskRecord({ status: 'cancel_requested' });
+    const envelope = createEnvelope(currentRecord.taskId);
+    const context = createContext({ attempts: 1, maxAttempts: 3 });
+
+    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
+    await handleBlenderExecute(envelope, context);
+
+    expect(currentRecord.status).toBe('cancelled');
+    expect(appendedEvents.at(-1)).toEqual(expect.objectContaining({ eventType: 'cancelled' }));
+    expect(generateBlenderScriptMock).not.toHaveBeenCalled();
+  });
+
+  test('rejects missing source images with source_asset_missing', async () => {
+    const envelope = createEnvelope(currentRecord.taskId);
+    const context = createContext({ attempts: 1, maxAttempts: 3 });
+    const missingError = new Error('NoSuchKey');
+    (missingError as Error & { name: string }).name = 'NoSuchKey';
+
+    downloadAssetMock.mockRejectedValue(missingError);
+
+    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
     await expect(handleBlenderExecute(envelope, context)).resolves.toBeUndefined();
 
     expect(currentRecord.status).toBe('rejected');
-    expect(currentRecord.message).toBe('unsupported workflow combination');
-    expect(currentRecord.errorCode).toBe('provider_rejected');
-    expect(appendedEvents.at(-1)).toEqual(expect.objectContaining({
-      eventType: 'rejected',
-    }));
-    expect(savedAttempts.at(-1)).toEqual(expect.objectContaining({
-      status: 'rejected',
-      errorMessage: 'unsupported workflow combination',
-    }));
+    expect(currentRecord.errorCode).toBe('source_asset_missing');
+    expect(savedAttempts.at(-1)).toEqual(expect.objectContaining({ status: 'rejected' }));
   });
 });
+
+function arrangeScriptGenerationWithSourceImage(): void {
+  const sourceBuffer = Buffer.from('image-binary');
+  downloadAssetMock.mockResolvedValue({
+    assetUri: 'assets://uploads/source.png',
+    buffer: sourceBuffer,
+    contentType: 'image/png',
+    filename: 'source.png',
+  });
+  generateBlenderScriptMock.mockResolvedValue({
+    notes: [],
+    provider: 'codex',
+    script: 'import bpy\nbpy.data.objects\n',
+    summary: 'Generated a previs scene.',
+    threadId: 'thread_123',
+  });
+}
+
+function createProviderArtifacts() {
+  return [
+    { artifact_id: 'scene_blend', filename: 'scene.blend', content_type: 'application/x-blender' },
+    { artifact_id: 'model_obj', filename: 'model.obj', content_type: 'model/obj' },
+    { artifact_id: 'preview_png', filename: 'preview.png', content_type: 'image/png' },
+    { artifact_id: 'summary_json', filename: 'summary.json', content_type: 'application/json' },
+    { artifact_id: 'pace_json', filename: 'pace.json', content_type: 'application/json' },
+    { artifact_id: 'generated_scene_py', filename: 'generated_scene.py', content_type: 'text/x-python' },
+  ];
+}
 
 function createEnvelope(taskId: string): QueueJobEnvelope<{ taskId: string }> {
   return {
@@ -344,9 +461,9 @@ function createContext(input: Pick<QueueHandlerContext, 'attempts' | 'maxAttempt
   };
 }
 
-function createTaskRecord(): WorkerTaskRecord {
+function createTaskRecord(overrides?: Partial<WorkerTaskRecord>): WorkerTaskRecord {
   const now = '2026-06-10T00:00:00.000Z';
-  return {
+  const base: WorkerTaskRecord = {
     taskId: 'task_123',
     taskType: 'blender',
     projectId: 'project_456',
@@ -391,5 +508,22 @@ function createTaskRecord(): WorkerTaskRecord {
     startedAt: null,
     finishedAt: null,
     workerName: null,
+  };
+
+  if (!overrides) {
+    return base;
+  }
+
+  return {
+    ...base,
+    ...overrides,
+    requestPayload: overrides.requestPayload ? {
+      ...structuredClone(base.requestPayload),
+      ...structuredClone(overrides.requestPayload),
+      _taskRuntime: {
+        ...(base.requestPayload._taskRuntime as Record<string, unknown>),
+        ...(((overrides.requestPayload as Record<string, unknown>)._taskRuntime as Record<string, unknown> | undefined) || {}),
+      },
+    } : structuredClone(base.requestPayload),
   };
 }

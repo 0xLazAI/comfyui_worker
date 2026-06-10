@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { basename, extname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import os from 'os';
 import { generateBlenderScript } from '../blender/agent.js';
 import {
@@ -10,12 +13,23 @@ import {
 import { WORKER_NAME } from '../infra/constants.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
 import { downloadAsset, uploadWorkerAsset } from '../render/assetStore.js';
-import { TaskRejectedError } from '../render/errors.js';
+import { ProviderRequestError, TaskRejectedError } from '../render/errors.js';
 import { hydrateBlenderTaskPayload } from '../blender/payload.js';
 import { taskStore } from './taskStore.js';
 import { isTerminalWorkerTaskStatus, utcNow } from './types.js';
 
 export const BLENDER_CONSUMER_KEY = 'blender_consumer';
+
+const REQUIRED_ARTIFACT_KINDS = [
+  'blend',
+  'model_obj',
+  'preview',
+  'summary',
+  'pace',
+  'generated_script',
+] as const;
+
+type RequiredArtifactKind = (typeof REQUIRED_ARTIFACT_KINDS)[number];
 
 export async function handleBlenderExecute(
   envelope: QueueJobEnvelope<{ taskId: string }>,
@@ -85,11 +99,12 @@ export async function handleBlenderExecute(
   });
 
   try {
-    const referenceImage = await downloadReferenceImage(payload.projectId, payload.inputs.sourceImageAssetUri);
-    const generatedScript = await generateBlenderScript(payload, {
-      workingDirectory: payload.projectRoot,
-      sourceImagePath: null,
-    });
+    const stagedReferenceImage = await stageReferenceImage(payload.projectId, payload.inputs.sourceImageAssetUri);
+    try {
+      const generatedScript = await generateBlenderScript(payload, {
+        workingDirectory: payload.projectRoot,
+        sourceImagePath: stagedReferenceImage?.sourceImagePath || null,
+      });
     await taskStore.save({
       ...(await expectTask(taskId)),
       status: 'running',
@@ -124,7 +139,7 @@ export async function handleBlenderExecute(
       model_id: modelId,
       pace: payload.pace,
       script: generatedScript.script,
-      ...(referenceImage ? { reference_image: referenceImage } : {}),
+      ...(stagedReferenceImage?.referenceImage ? { reference_image: stagedReferenceImage.referenceImage } : {}),
     });
     await taskStore.save({
       ...(await expectTask(taskId)),
@@ -204,6 +219,7 @@ export async function handleBlenderExecute(
       run_id: terminalStatus.run_id,
       runner_status: terminalStatus.status,
       artifacts,
+      artifact_uris: buildArtifactUriMap(artifacts),
     };
 
     await taskStore.save({
@@ -244,6 +260,9 @@ export async function handleBlenderExecute(
       durationMs: Date.now() - new Date(startedAt).getTime(),
       resultPayload: result,
     });
+    } finally {
+      await stagedReferenceImage?.cleanup();
+    }
   } catch (error: any) {
     if (error instanceof TaskRejectedError) {
       const finishedAt = utcNow();
@@ -360,17 +379,24 @@ export async function handleBlenderExecute(
   }
 }
 
-async function downloadReferenceImage(projectId: string, assetUri: string | null) {
+async function stageReferenceImage(projectId: string, assetUri: string | null) {
   if (!assetUri) {
     return null;
   }
 
   try {
     const downloaded = await downloadAsset(projectId, assetUri);
+    const tempDirectory = await mkdtemp(join(tmpdir(), 'comfyui-blender-reference-'));
+    const sourceImagePath = join(tempDirectory, buildSafeReferenceFilename(downloaded.filename, downloaded.contentType));
+    await writeFile(sourceImagePath, downloaded.buffer);
     return {
-      filename: downloaded.filename,
-      content_type: downloaded.contentType,
-      base64: downloaded.buffer.toString('base64'),
+      cleanup: async () => rm(tempDirectory, { recursive: true, force: true }),
+      referenceImage: {
+        filename: downloaded.filename,
+        content_type: downloaded.contentType,
+        base64: downloaded.buffer.toString('base64'),
+      },
+      sourceImagePath,
     };
   } catch (error: any) {
     const message = String(error?.message || error || '');
@@ -388,11 +414,24 @@ async function uploadArtifacts(
   attemptNo: number,
   workerName: string,
 ): Promise<Array<Record<string, unknown>>> {
-  const artifacts = Array.isArray(terminalStatus.artifacts) ? terminalStatus.artifacts : [];
+  const artifacts = normalizeRequiredArtifacts(terminalStatus);
   const uploadedArtifacts: Array<Record<string, unknown>> = [];
 
   for (const artifact of artifacts) {
     const downloaded = await downloadBlenderRunArtifact(terminalStatus.run_id, artifact);
+    if (!downloaded.buffer.byteLength) {
+      throw new ProviderRequestError(
+        `Blender API returned an empty artifact: ${artifact.kind}`,
+        502,
+        'provider_empty_artifact',
+        {
+          artifact_id: artifact.artifact_id,
+          filename: artifact.filename || null,
+          kind: artifact.kind,
+          run_id: terminalStatus.run_id,
+        },
+      );
+    }
     const uploaded = await uploadWorkerAsset(projectId, 'blender', {
       buffer: downloaded.buffer,
       contentType: downloaded.contentType,
@@ -415,12 +454,12 @@ async function uploadArtifacts(
 }
 
 function buildUploadedArtifactDetail(
-  artifact: BlenderApiArtifactMetadata,
+  artifact: BlenderApiArtifactMetadata & { kind: RequiredArtifactKind },
   uploaded: Awaited<ReturnType<typeof uploadWorkerAsset>>,
 ): Record<string, unknown> {
   return {
     artifact_id: artifact.artifact_id,
-    kind: readArtifactKind(artifact),
+    kind: artifact.kind,
     filename: uploaded.filename,
     content_type: uploaded.contentType,
     bytes: uploaded.bytes,
@@ -428,9 +467,99 @@ function buildUploadedArtifactDetail(
   };
 }
 
-function readArtifactKind(artifact: BlenderApiArtifactMetadata): string | null {
-  const normalized = String(artifact.kind || artifact.type || '').trim();
-  return normalized || null;
+function normalizeRequiredArtifacts(
+  terminalStatus: BlenderApiRunStatus,
+): Array<BlenderApiArtifactMetadata & { kind: RequiredArtifactKind }> {
+  const artifacts = Array.isArray(terminalStatus.artifacts) ? terminalStatus.artifacts : [];
+  const artifactByKind = new Map<RequiredArtifactKind, BlenderApiArtifactMetadata & { kind: RequiredArtifactKind }>();
+
+  for (const artifact of artifacts) {
+    const kind = inferArtifactKind(artifact);
+    if (kind && !artifactByKind.has(kind)) {
+      artifactByKind.set(kind, { ...artifact, kind });
+    }
+  }
+
+  const missingKinds = REQUIRED_ARTIFACT_KINDS.filter((kind) => !artifactByKind.has(kind));
+  if (missingKinds.length) {
+    throw new ProviderRequestError(
+      `Blender API run completed without required artifacts: ${missingKinds.join(', ')}`,
+      502,
+      'provider_missing_artifact',
+      {
+        missing_kinds: missingKinds,
+        run_id: terminalStatus.run_id,
+      },
+    );
+  }
+
+  return REQUIRED_ARTIFACT_KINDS.map((kind) => artifactByKind.get(kind) as BlenderApiArtifactMetadata & { kind: RequiredArtifactKind });
+}
+
+function inferArtifactKind(artifact: Pick<BlenderApiArtifactMetadata, 'artifact_id' | 'filename'>): RequiredArtifactKind | null {
+  const artifactId = normalizeArtifactToken(artifact.artifact_id);
+  const filename = normalizeArtifactToken(artifact.filename);
+
+  if (artifactId === 'scene_blend' || filename === 'scene_blend') {
+    return 'blend';
+  }
+  if (artifactId === 'model_obj' || filename === 'model_obj') {
+    return 'model_obj';
+  }
+  if (artifactId === 'preview_png' || filename === 'preview_png') {
+    return 'preview';
+  }
+  if (artifactId === 'summary_json' || filename === 'summary_json') {
+    return 'summary';
+  }
+  if (artifactId === 'pace_json' || filename === 'pace_json') {
+    return 'pace';
+  }
+  if (artifactId === 'generated_scene_py' || filename === 'generated_scene_py') {
+    return 'generated_script';
+  }
+  return null;
+}
+
+function buildArtifactUriMap(artifacts: Array<Record<string, unknown>>): Record<RequiredArtifactKind, string> {
+  const result = {} as Record<RequiredArtifactKind, string>;
+  for (const artifact of artifacts) {
+    const kind = artifact.kind as RequiredArtifactKind;
+    result[kind] = String(artifact.asset_uri || '');
+  }
+  return result;
+}
+
+function normalizeArtifactToken(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function buildSafeReferenceFilename(filename: string, contentType: string): string {
+  const safeBase = basename(String(filename || '').trim() || 'reference-image')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+/, '') || 'reference-image';
+  const extension = extname(safeBase) || inferExtensionFromContentType(contentType);
+  const stem = safeBase.slice(0, safeBase.length - extname(safeBase).length) || 'reference-image';
+  return `${stem}${extension || '.bin'}`;
+}
+
+function inferExtensionFromContentType(contentType: string): string {
+  const normalized = String(contentType || '').toLowerCase();
+  if (normalized.includes('png')) {
+    return '.png';
+  }
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) {
+    return '.jpg';
+  }
+  if (normalized.includes('webp')) {
+    return '.webp';
+  }
+  return '.bin';
 }
 
 async function expectTask(taskId: string) {
@@ -499,6 +628,16 @@ function buildTaskFailureDetail(error: unknown): Record<string, unknown> {
     return {
       errorName: error.name,
       code: error.code,
+      message: error.message,
+    };
+  }
+
+  if (error instanceof ProviderRequestError) {
+    return {
+      errorName: error.name,
+      code: error.code,
+      statusCode: error.statusCode,
+      detail: error.detail || null,
       message: error.message,
     };
   }
