@@ -184,12 +184,11 @@ PAI_PROJECTS_EXPECT_SHARED_FS=false
 
 - [deploy/droplet/deploy.sh](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/deploy.sh)
 - [deploy/droplet/install-host.sh](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/install-host.sh)
-- [deploy/droplet/comfyui-worker-server.service](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/comfyui-worker-server.service)
-- [deploy/droplet/comfyui-worker-consumer.service](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/comfyui-worker-consumer.service)
+- [deploy/droplet/comfyui-worker.supervisor.conf](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/comfyui-worker.supervisor.conf)
 - [deploy/droplet/droplet.env.example](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/droplet.env.example)
 
 Droplet 版现在是宿主机直跑，不再依赖 Docker。  
-代码会直接从 GitHub 仓库拉到宿主机，再由 `systemd` 维护：
+代码会直接从 GitHub 仓库拉到宿主机，再由 `supervisord` 维护：
 
 - HTTP server
 - queue worker
@@ -205,7 +204,7 @@ Droplet 版现在是宿主机直跑，不再依赖 Docker。
    - `PAI_WEBDAV_USERNAME`
    - `PAI_WEBDAV_PASSWORD`
    - `LOCAL_ENV_FILE`
-3. 确保本地 `.env` 已经填好 PostgreSQL / Redis / S3 / Stephen 配置
+3. 确保本地 `.env.prod` 已经填好 PostgreSQL / Redis / S3 / Stephen 配置
 4. 执行：
 
 ```bash
@@ -216,12 +215,12 @@ bash deploy/droplet/deploy.sh
 这个脚本会做：
 
 - 让 Droplet 从 GitHub clone / fetch 仓库
-- 上传本地 `.env` 到远端 `${APP_DIR}/.env`
-- 安装 `nodejs`、`git`、`davfs2`
+- 上传本地 `.env.prod` 到远端 `${APP_DIR}/.env`
+- 安装 `nodejs`、`git`、`davfs2`、`supervisor`
 - 把 WebDAV 挂到宿主机 `${PAI_WEBDAV_MOUNT_POINT}`
 - 再 bind 到宿主机 `/data/pai-projects`
 - `npm ci && npm run compile`
-- 安装并重启两个 `systemd` 服务
+- 写入并刷新 `supervisord` 配置
 
 最终挂载关系是：
 
