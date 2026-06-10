@@ -140,7 +140,7 @@ function validateGeneratedBlenderScriptResponse(value: unknown): GeneratedBlende
   const script = requireNonEmptyString(typed.script, 'script');
   const summary = requireNonEmptyString(typed.summary, 'summary');
 
-  if (!/\bbpy\b/.test(script)) {
+  if (!isValidBlenderScript(script)) {
     throw new Error('Codex returned a script that does not import or use bpy.');
   }
 
@@ -160,6 +160,99 @@ function requireNonEmptyString(value: unknown, field: string): string {
     throw new Error(`Codex returned invalid ${field}.`);
   }
   return value;
+}
+
+function isValidBlenderScript(script: string): boolean {
+  const normalized = stripPythonCommentsAndStrings(script);
+  const hasBpyImport =
+    /(?:^|\n)\s*(?:import\s+bpy\b(?:\s+as\s+[A-Za-z_]\w*)?|from\s+bpy(?:\.[A-Za-z_]\w*)*\s+import\b)/m.test(
+      normalized,
+    );
+  const hasBpyAccess = /\bbpy\.[A-Za-z_]\w*/.test(normalized);
+
+  return hasBpyImport && hasBpyAccess;
+}
+
+function stripPythonCommentsAndStrings(script: string): string {
+  let output = '';
+  let index = 0;
+
+  while (index < script.length) {
+    const char = script[index];
+    const next3 = script.slice(index, index + 3);
+
+    if (next3 === "'''" || next3 === '"""') {
+      const endIndex = findTripleQuotedStringEnd(script, index + 3, next3);
+      output += maskScriptSegment(script.slice(index, endIndex));
+      index = endIndex;
+      continue;
+    }
+
+    if (char === '\'' || char === '"') {
+      const endIndex = findQuotedStringEnd(script, index + 1, char);
+      output += maskScriptSegment(script.slice(index, endIndex));
+      index = endIndex;
+      continue;
+    }
+
+    if (char === '#') {
+      const endIndex = findCommentEnd(script, index + 1);
+      output += maskScriptSegment(script.slice(index, endIndex));
+      index = endIndex;
+      continue;
+    }
+
+    output += char;
+    index += 1;
+  }
+
+  return output;
+}
+
+function findTripleQuotedStringEnd(script: string, startIndex: number, quote: string): number {
+  let index = startIndex;
+
+  while (index < script.length) {
+    if (script[index] === '\\') {
+      index += 2;
+      continue;
+    }
+
+    if (script.slice(index, index + 3) === quote) {
+      return index + 3;
+    }
+
+    index += 1;
+  }
+
+  return script.length;
+}
+
+function findQuotedStringEnd(script: string, startIndex: number, quote: string): number {
+  let index = startIndex;
+
+  while (index < script.length) {
+    const char = script[index];
+    if (char === '\\') {
+      index += 2;
+      continue;
+    }
+    if (char === quote) {
+      return index + 1;
+    }
+    index += 1;
+  }
+
+  return script.length;
+}
+
+function findCommentEnd(script: string, startIndex: number): number {
+  const newlineIndex = script.indexOf('\n', startIndex);
+  return newlineIndex === -1 ? script.length : newlineIndex;
+}
+
+function maskScriptSegment(segment: string): string {
+  return segment.replace(/[^\n]/g, ' ');
 }
 
 async function generateWithCodex(

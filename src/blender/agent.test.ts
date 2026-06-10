@@ -1,4 +1,7 @@
-import { expect, test } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { afterEach, expect, test, vi } from 'vitest';
 
 import type { HydratedBlenderTaskPayload } from './types.js';
 import {
@@ -41,6 +44,17 @@ const BASE_PAYLOAD: HydratedBlenderTaskPayload = {
   projectId: 'project_456',
   projectRoot: '/data/pai-projects/demo-project',
 };
+
+afterEach(async () => {
+  setBlenderScriptGeneratorForTests(undefined);
+  vi.resetModules();
+  vi.restoreAllMocks();
+  vi.doUnmock('@openai/codex-sdk');
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.CODEX_API_KEY;
+  delete process.env.CODEX_CLI_PATH;
+  delete process.env.OPENAI_CODEX_MODEL;
+});
 
 test('generateBlenderScript uses test override when installed', async () => {
   const calls: Array<{
@@ -95,6 +109,147 @@ test('parseGeneratedBlenderScriptResponse rejects scripts that do not use bpy', 
       }),
     ),
   ).toThrow('Codex returned a script that does not import or use bpy.');
+});
+
+test('parseGeneratedBlenderScriptResponse rejects bpy false positives from strings and comments', () => {
+  expect(() =>
+    parseGeneratedBlenderScriptResponse(
+      JSON.stringify({
+        notes: ['string false positive'],
+        script: 'import bpy\nprint("bpy")\n',
+        summary: 'string false positive',
+      }),
+    ),
+  ).toThrow('Codex returned a script that does not import or use bpy.');
+
+  expect(() =>
+    parseGeneratedBlenderScriptResponse(
+      JSON.stringify({
+        notes: ['comment false positive'],
+        script: 'import bpy\n# bpy.ops.object.select_all()\n',
+        summary: 'comment false positive',
+      }),
+    ),
+  ).toThrow('Codex returned a script that does not import or use bpy.');
+});
+
+test('parseGeneratedBlenderScriptResponse accepts a real Blender script shape', () => {
+  expect(
+    parseGeneratedBlenderScriptResponse(
+      JSON.stringify({
+        notes: ['valid'],
+        script: 'import bpy\nbpy.ops.object.select_all()\n',
+        summary: 'valid blender script',
+      }),
+    ),
+  ).toMatchObject({
+    notes: ['valid'],
+    script: 'import bpy\nbpy.ops.object.select_all()\n',
+    summary: 'valid blender script',
+  });
+});
+
+test('generateBlenderScript codex branch uses strict sandbox options and structured output schema', async () => {
+  const threadRun = vi.fn().mockResolvedValue({
+    finalResponse: JSON.stringify({
+      notes: ['generated'],
+      script: 'import bpy\nbpy.ops.object.select_all()\n',
+      summary: 'generated blender script',
+    }),
+  });
+  const startThread = vi.fn().mockReturnValue({
+    id: 'thread_live',
+    run: threadRun,
+  });
+  const codexConstructor = vi.fn();
+  function CodexMock(options: unknown) {
+    codexConstructor(options);
+    return {
+      startThread,
+    };
+  }
+
+  vi.resetModules();
+  vi.doMock('@openai/codex-sdk', () => ({
+    Codex: CodexMock,
+  }));
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-agent-test-'));
+  const fakeCodexCliPath = path.join(tempRoot, 'codex');
+  await writeFile(fakeCodexCliPath, '#!/bin/sh\n');
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.CODEX_CLI_PATH = fakeCodexCliPath;
+  process.env.OPENAI_CODEX_MODEL = 'gpt-test-codex';
+
+  try {
+    const { generateBlenderScript: generateBlenderScriptWithMock } = await import('./agent.js');
+    const result = await generateBlenderScriptWithMock(BASE_PAYLOAD, {
+      sourceImagePath: '/tmp/source.png',
+      workingDirectory: '/tmp/blender-job',
+    });
+
+    expect(result).toMatchObject({
+      notes: ['generated'],
+      provider: 'codex',
+      summary: 'generated blender script',
+      threadId: 'thread_live',
+    });
+    expect(codexConstructor).toHaveBeenCalledWith({
+      apiKey: 'test-openai-key',
+      codexPathOverride: fakeCodexCliPath,
+    });
+    expect(startThread).toHaveBeenCalledWith({
+      approvalPolicy: 'never',
+      model: 'gpt-test-codex',
+      modelReasoningEffort: 'low',
+      networkAccessEnabled: false,
+      sandboxMode: 'workspace-write',
+      skipGitRepoCheck: true,
+      webSearchMode: 'disabled',
+      workingDirectory: '/tmp/blender-job',
+    });
+    expect(threadRun).toHaveBeenCalledTimes(1);
+
+    const [input, turnOptions] = threadRun.mock.calls[0] as [
+      Array<{ path?: string; text?: string; type: string }>,
+      { outputSchema: unknown },
+    ];
+    expect(input).toEqual([
+      {
+        text: expect.stringContaining('Workflow: blender-create-3d'),
+        type: 'text',
+      },
+      {
+        path: '/tmp/source.png',
+        type: 'local_image',
+      },
+    ]);
+    expect((input[0] as { text: string }).text).toContain('Task id: task_123');
+    expect(turnOptions).toEqual({
+      outputSchema: {
+        additionalProperties: false,
+        properties: {
+          notes: {
+            items: { type: 'string' },
+            type: 'array',
+          },
+          script: {
+            description: 'Complete executable Blender Python script.',
+            type: 'string',
+          },
+          summary: {
+            description: 'Short human-readable summary of the script.',
+            type: 'string',
+          },
+        },
+        required: ['script', 'summary', 'notes'],
+        type: 'object',
+      },
+    });
+  } finally {
+    await rm(tempRoot, { force: true, recursive: true });
+  }
 });
 
 test('buildBlenderScriptPrompt includes workflow context, identifiers, update prompt, and guardrails', () => {
