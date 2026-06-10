@@ -6,6 +6,7 @@ import type {
   BlenderPayloadContext,
   BlenderPace,
   BlenderRunnerTarget,
+  BlenderWorkflowId,
   HydratedBlenderTaskPayload,
   JsonObject,
   JsonValue,
@@ -31,10 +32,10 @@ export function hydrateBlenderTaskPayload(
   const projectRoot = normalizeProjectRoot(context.projectRoot);
   const agent = normalizeAgent(payload.agent);
   const runnerTarget = normalizeRunnerTarget(payload.runner_target);
-  const sourceImageAssetUri = normalizeSourceImageAssetUri(payload);
+  const sourceImageAssetUri = normalizeSourceImageAssetUri(payload, workflow.id);
 
   if (workflow.id === 'blender-create-3d') {
-    const pace = normalizeRequiredPace(payload.pace, sceneId, shotId);
+    const pace = normalizeRequiredPace(payload.pace, workflow.id, sceneId, shotId);
     if (!sourceImageAssetUri) {
       throw new ValidationError('payload.inputs.image.assetUri is required');
     }
@@ -59,7 +60,7 @@ export function hydrateBlenderTaskPayload(
 
   const modelId = requireString(payload.model_id, 'payload.model_id');
   const prompt = requireString(payload.prompt, 'payload.prompt');
-  const pace = normalizeOptionalPace(payload.pace, sceneId, shotId);
+  const pace = normalizeOptionalPace(payload.pace, workflow.id, sceneId, shotId);
 
   return {
     workflow,
@@ -79,7 +80,7 @@ export function hydrateBlenderTaskPayload(
   };
 }
 
-export function createDefaultPace(sceneId: string, shotId: string): BlenderPace {
+export function createDefaultPace(workflowId: BlenderWorkflowId, sceneId: string, shotId: string): BlenderPace {
   return {
     camera: {
       focal_length_mm: 35,
@@ -88,7 +89,7 @@ export function createDefaultPace(sceneId: string, shotId: string): BlenderPace 
     },
     event: {
       trigger_frame: 1,
-      type: 'create-3d',
+      type: workflowId === 'blender-update-3d' ? 'update-3d' : 'create-3d',
     },
     lighting: {
       energy: 850,
@@ -108,31 +109,42 @@ export function createDefaultPace(sceneId: string, shotId: string): BlenderPace 
   };
 }
 
-function normalizeRequiredPace(value: unknown, sceneId: string, shotId: string): BlenderPace {
+function normalizeRequiredPace(value: unknown, workflowId: BlenderWorkflowId, sceneId: string, shotId: string): BlenderPace {
   if (value === undefined || value === null || value === '') {
     throw new ValidationError('payload.pace is required');
   }
-  return normalizePace(value, sceneId, shotId);
+  return normalizePace(value, workflowId, sceneId, shotId);
 }
 
-function normalizeOptionalPace(value: unknown, sceneId: string, shotId: string): BlenderPace {
+function normalizeOptionalPace(value: unknown, workflowId: BlenderWorkflowId, sceneId: string, shotId: string): BlenderPace {
   if (value === undefined || value === null || value === '') {
-    return createDefaultPace(sceneId, shotId);
+    return createDefaultPace(workflowId, sceneId, shotId);
   }
-  return normalizePace(value, sceneId, shotId);
+  return normalizePace(value, workflowId, sceneId, shotId);
 }
 
-function normalizePace(value: unknown, sceneId: string, shotId: string): BlenderPace {
-  const fallback = createDefaultPace(sceneId, shotId);
+function normalizePace(value: unknown, workflowId: BlenderWorkflowId, sceneId: string, shotId: string): BlenderPace {
+  const fallback = createDefaultPace(workflowId, sceneId, shotId);
   const normalized = requireJsonObject(value, 'payload.pace');
+  const fallbackCamera = requireJsonObject(fallback.camera, 'payload.pace.camera');
+  const fallbackEvent = requireJsonObject(fallback.event, 'payload.pace.event');
+  const fallbackLighting = requireJsonObject(fallback.lighting, 'payload.pace.lighting');
+  const fallbackStyle = requireJsonObject(fallback.style, 'payload.pace.style');
+  const camera = normalizeOptionalSection(normalized.camera, 'payload.pace.camera');
+  const event = normalizeOptionalSection(normalized.event, 'payload.pace.event');
+  const lighting = normalizeOptionalSection(normalized.lighting, 'payload.pace.lighting');
   const sceneValue = normalized.scene;
   const scene = sceneValue === undefined ? {} : requireJsonObject(sceneValue, 'payload.pace.scene');
   const schemaVersionValue = normalized.schema_version;
   const schemaVersion = schemaVersionValue === undefined ? fallback.schema_version : requireString(schemaVersionValue, 'payload.pace.schema_version');
+  const style = normalizeOptionalSection(normalized.style, 'payload.pace.style');
 
   return {
     ...fallback,
     ...normalized,
+    ...(camera ? { camera: { ...fallbackCamera, ...camera } } : {}),
+    ...(event ? { event: { ...fallbackEvent, ...event } } : {}),
+    ...(lighting ? { lighting: { ...fallbackLighting, ...lighting } } : {}),
     schema_version: schemaVersion,
     scene: {
       ...fallback.scene,
@@ -140,22 +152,29 @@ function normalizePace(value: unknown, sceneId: string, shotId: string): Blender
       scene_id: sceneId,
       shot_id: shotId,
     },
+    ...(style ? { style: { ...fallbackStyle, ...style } } : {}),
   };
 }
 
-function normalizeSourceImageAssetUri(payload: Record<string, unknown>): string | null {
+function normalizeSourceImageAssetUri(payload: Record<string, unknown>, workflowId: BlenderWorkflowId): string | null {
   const inputs = payload.inputs;
   if (inputs !== undefined && inputs !== null && inputs !== '') {
     const normalizedInputs = requireObject(inputs, 'payload.inputs');
     const image = normalizedInputs.image;
     if (image !== undefined && image !== null && image !== '') {
       const normalizedImage = requireObject(image, 'payload.inputs.image');
-      return requireString(normalizedImage.assetUri, 'payload.inputs.image.assetUri');
+      return requireAssetUri(normalizedImage.assetUri, 'payload.inputs.image.assetUri');
     }
   }
 
   const legacyImageAssetUri = optionalString(payload.image);
-  return legacyImageAssetUri || null;
+  if (!legacyImageAssetUri) {
+    return null;
+  }
+  if (workflowId === 'blender-create-3d') {
+    return requireAssetUri(legacyImageAssetUri, 'payload.image');
+  }
+  return requireAssetUri(legacyImageAssetUri, 'payload.image');
 }
 
 function normalizeAgent(value: unknown): BlenderAgent {
@@ -176,6 +195,14 @@ function normalizeRunnerTarget(value: unknown): BlenderRunnerTarget {
   const normalized = requireString(value, 'payload.runner_target') as BlenderRunnerTarget;
   if (!VALID_RUNNER_TARGETS.has(normalized)) {
     throw new ValidationError('payload.runner_target must be one of: local, gpu');
+  }
+  return normalized;
+}
+
+function requireAssetUri(value: unknown, field: string): string {
+  const normalized = requireString(value, field);
+  if (!normalized.startsWith('assets://')) {
+    throw new ValidationError(`${field} must start with assets://`);
   }
   return normalized;
 }
@@ -207,6 +234,13 @@ function requireJsonObject(value: unknown, field: string): JsonObject {
   return normalized;
 }
 
+function normalizeOptionalSection(value: JsonValue | undefined, field: string): JsonObject | null {
+  if (value === undefined) {
+    return null;
+  }
+  return requireJsonObject(value, field);
+}
+
 function cloneJsonValue(value: unknown, field: string): JsonValue {
   if (value === null) {
     return null;
@@ -227,7 +261,7 @@ function cloneJsonValue(value: unknown, field: string): JsonValue {
     return value.map((entry, index) => cloneJsonValue(entry, `${field}[${index}]`));
   }
 
-  if (value && typeof value === 'object') {
+  if (isPlainObject(value)) {
     const output: JsonObject = {};
     for (const [key, entry] of Object.entries(value)) {
       if (entry === undefined) {
@@ -239,4 +273,12 @@ function cloneJsonValue(value: unknown, field: string): JsonValue {
   }
 
   throw new ValidationError(`${field} must be JSON-compatible`);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }

@@ -25,7 +25,7 @@ test('hydrateBlenderTaskPayload normalizes create payload with defaults and sour
       },
       inputs: {
         image: {
-          assetUri: 's3://bucket/assets/source.png',
+          assetUri: 'assets://source-images/source.png',
         },
       },
     },
@@ -46,13 +46,17 @@ test('hydrateBlenderTaskPayload normalizes create payload with defaults and sour
     modelId: null,
     prompt: null,
     inputs: {
-      sourceImageAssetUri: 's3://bucket/assets/source.png',
+      sourceImageAssetUri: 'assets://source-images/source.png',
     },
   });
   expect(normalized.pace.scene).toMatchObject({
     scene_id: 'scene_001',
     shot_id: 'shot_010',
     mood: 'golden-hour',
+  });
+  expect(normalized.pace.event).toMatchObject({
+    type: 'create-3d',
+    trigger_frame: 1,
   });
 });
 
@@ -83,13 +87,44 @@ test('hydrateBlenderTaskPayload requires create payload fields', () => {
         },
         inputs: {
           image: {
-            assetUri: 's3://bucket/assets/source.png',
+            assetUri: 'assets://source-images/source.png',
           },
         },
       },
       CONTEXT,
     ),
   ).toThrow('payload.scene_id is required');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        inputs: {
+          image: {
+            assetUri: 'assets://source-images/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.shot_id is required');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        inputs: {
+          image: {
+            assetUri: 'assets://source-images/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace is required');
 });
 
 test('hydrateBlenderTaskPayload normalizes update payload with fallback pace defaults', () => {
@@ -123,6 +158,10 @@ test('hydrateBlenderTaskPayload normalizes update payload with fallback pace def
     scene_id: 'scene_002',
     shot_id: 'shot_020',
   });
+  expect(normalized.pace.event).toMatchObject({
+    type: 'update-3d',
+    trigger_frame: 1,
+  });
 });
 
 test('hydrateBlenderTaskPayload requires update payload fields', () => {
@@ -149,6 +188,30 @@ test('hydrateBlenderTaskPayload requires update payload fields', () => {
       CONTEXT,
     ),
   ).toThrow('payload.prompt is required');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-update-3d',
+        shot_id: 'shot_020',
+        model_id: 'model_abc',
+        prompt: 'Refine the environment.',
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.scene_id is required');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-update-3d',
+        scene_id: 'scene_002',
+        model_id: 'model_abc',
+        prompt: 'Refine the environment.',
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.shot_id is required');
 });
 
 test('hydrateBlenderTaskPayload forces scene identifiers inside pace for update payloads', () => {
@@ -180,6 +243,225 @@ test('hydrateBlenderTaskPayload forces scene identifiers inside pace for update 
     shot_id: 'shot_override',
     variation: 'night',
   });
+});
+
+test('hydrateBlenderTaskPayload deep-merges known pace sections for partial overrides', () => {
+  const normalized = hydrateBlenderTaskPayload(
+    {
+      workflow: 'blender-create-3d',
+      scene_id: 'scene_001',
+      shot_id: 'shot_010',
+      pace: {
+        schema_version: 'pace-1',
+        camera: {
+          focal_length_mm: 50,
+        },
+      },
+      inputs: {
+        image: {
+          assetUri: 'assets://source-images/source.png',
+        },
+      },
+    },
+    CONTEXT,
+  );
+
+  expect(normalized.pace.camera).toMatchObject({
+    focal_length_mm: 50,
+    look_at: [0, 0, 0.8],
+    position: [4, -4, 2.6],
+  });
+});
+
+test('hydrateBlenderTaskPayload requires source image asset URIs to use assets scheme', () => {
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          schema_version: 'pace-1',
+          scene: {},
+        },
+        inputs: {
+          image: {
+            assetUri: 's3://bucket/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.inputs.image.assetUri must start with assets://');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          schema_version: 'pace-1',
+          scene: {},
+        },
+        image: 'https://example.com/source.png',
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.image must start with assets://');
+});
+
+test('hydrateBlenderTaskPayload rejects lossy or non-plain objects inside pace', () => {
+  class PaceWrapper {
+    scene = { variation: 'night' };
+  }
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          schema_version: 'pace-1',
+          scene: {
+            started_at: new Date(),
+          },
+        },
+        inputs: {
+          image: {
+            assetUri: 'assets://source-images/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace.scene.started_at must be JSON-compatible');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          schema_version: 'pace-1',
+          event: new Map([['type', 'create-3d']]),
+        },
+        inputs: {
+          image: {
+            assetUri: 'assets://source-images/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace.event must be JSON-compatible');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: new PaceWrapper() as unknown as Record<string, unknown>,
+        inputs: {
+          image: {
+            assetUri: 'assets://source-images/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace must be JSON-compatible');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          schema_version: 'pace-1',
+          camera: {
+            exposure: Number.NaN,
+          },
+        },
+        inputs: {
+          image: {
+            assetUri: 'assets://source-images/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace.camera.exposure must be JSON-compatible');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          schema_version: 'pace-1',
+          style: {
+            on_complete: () => 'done',
+          },
+        },
+        inputs: {
+          image: {
+            assetUri: 'assets://source-images/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace.style.on_complete must be JSON-compatible');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          schema_version: 'pace-1',
+          style: {
+            token: Symbol('pace'),
+          },
+        },
+        inputs: {
+          image: {
+            assetUri: 'assets://source-images/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace.style.token must be JSON-compatible');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          schema_version: 'pace-1',
+          style: {
+            asset_id: undefined,
+          },
+        },
+        inputs: {
+          image: {
+            assetUri: 'assets://source-images/source.png',
+          },
+        },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace.style.asset_id must be JSON-compatible');
 });
 
 test('hydrateBlenderTaskPayload rejects unsupported workflows', () => {
