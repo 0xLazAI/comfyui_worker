@@ -101,7 +101,7 @@ cd /Users/maozhijian/Documents/GitHub/comfyui_worker
 docker build -t comfyui-worker:local .
 ```
 
-本地起 API：
+本地起 API + queue worker（默认模式）：
 
 ```bash
 docker run --rm -p 8091:8091 \
@@ -110,10 +110,10 @@ docker run --rm -p 8091:8091 \
   -v /absolute/host/pai-cache:/var/cache/pai \
   -v /absolute/host/pai-tmp:/var/tmp/pai \
   -v /absolute/host/pai-log:/var/log/pai \
-  comfyui-worker:local server
+  comfyui-worker:local
 ```
 
-本地起 queue worker：
+如果你要手动拆开运行，也仍然支持：
 
 ```bash
 docker run --rm \
@@ -137,10 +137,12 @@ docker run --rm \
 
 ## DigitalOcean App Platform
 
-这个镜像可以直接部署到 DO App Platform，并拆成两个 component：
+这个镜像现在默认就是单容器双进程：
 
-- service component 命令：`server`
-- worker component 命令：`worker`
+- 前台主进程：HTTP service
+- 后台由 `supervisord` 保活：queue worker
+
+所以在 DO App Platform 上，默认只需要一个 service component，不再要求你额外再建一个 worker component。
 
 但要注意，PAI worker contract 要求项目目录是一个共享挂载目录，而 DO App Platform 不支持这种部署方式。DigitalOcean 官方文档明确说明：
 
@@ -155,7 +157,7 @@ docker run --rm \
 
 所以：
 
-- 如果只是验证镜像、验证 provider/S3/DB/Redis 链路，App Platform 可以跑
+- 如果只是验证镜像、验证 provider/S3/DB/Redis 链路，App Platform 可以跑，而且默认会同时带起 API 和 consumer
 - 如果要满足 PAI worker 的共享项目目录合约，应该部署到 Droplet 或 DOKS，然后把 WebDAV 或其他共享文件系统挂到宿主机，再 bind mount 到容器内 `/data/pai-projects`
 
 如果你在 App Platform 上只是做 smoke test，建议显式设置：

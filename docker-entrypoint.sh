@@ -16,7 +16,11 @@ export PAI_LOG_DIR="${LOG_ROOT}"
 
 mkdir -p "${PROJECTS_ROOT}" "${REGISTRY_ROOT}" "${CACHE_ROOT}" "${TMP_ROOT}" "${LOG_ROOT}"
 
-case "${1:-server}" in
+case "${1:-container}" in
+  container)
+    shift || true
+    exec /usr/bin/tini -- /usr/local/bin/start-container.sh "$@"
+    ;;
   server)
     shift || true
     exec node ./dist/index.js "$@"
