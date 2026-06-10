@@ -1,9 +1,16 @@
-export type TaskDefinitionFieldType = 'string' | 'number' | 'integer' | 'boolean';
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+
+export type TaskDefinitionFieldType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'json';
 
 export interface TaskDefinitionFieldRule {
   type: TaskDefinitionFieldType;
   required?: boolean;
-  default?: string | number | boolean;
+  default?: JsonValue;
   description?: string;
   minimum?: number;
   maximum?: number;

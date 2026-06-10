@@ -2,6 +2,8 @@ import { ConflictError, ValidationError } from '../infra/HttpError.js';
 import {
   TASK_DEFINITION_META_KEY,
   TASK_RUNTIME_META_KEY,
+  type JsonObject,
+  type JsonValue,
   type TaskDefinitionBinding,
   type TaskDefinitionFieldType,
   type TaskDefinitionFieldRule,
@@ -54,7 +56,7 @@ export function normalizePayloadWithDefinition(
 
   for (const [fieldPath, rule] of Object.entries(fieldRules)) {
     const rawValue = getValueAtPath(source, fieldPath);
-    if (isMissingValue(rawValue)) {
+    if (isMissingValue(rawValue, rule)) {
       if (rule.default !== undefined) {
         setValueAtPath(normalized, fieldPath, structuredClone(rule.default));
         continue;
@@ -124,6 +126,16 @@ function normalizeTaskDefinitionFieldRule(value: unknown, field: string): TaskDe
   const description = optionalString(rule.description);
   const minimum = normalizeOptionalNumber(rule.minimum, `${field}.minimum`);
   const maximum = normalizeOptionalNumber(rule.maximum, `${field}.maximum`);
+
+  if (!isNumericFieldType(type)) {
+    if (minimum !== undefined) {
+      throw new ValidationError(`${field}.minimum is only allowed for number or integer fields`);
+    }
+    if (maximum !== undefined) {
+      throw new ValidationError(`${field}.maximum is only allowed for number or integer fields`);
+    }
+  }
+
   const defaultValue = rule.default === undefined ? undefined : normalizeDefaultValue(rule.default, `${field}.default`, {
     type,
     minimum,
@@ -146,13 +158,13 @@ function normalizeTaskDefinitionFieldRule(value: unknown, field: string): TaskDe
 
 function normalizeFieldType(value: unknown, field: string): TaskDefinitionFieldType {
   const normalized = requireString(value, field);
-  if (!['string', 'number', 'integer', 'boolean'].includes(normalized)) {
-    throw new ValidationError(`${field} must be one of string, number, integer, boolean`);
+  if (!['string', 'number', 'integer', 'boolean', 'object', 'json'].includes(normalized)) {
+    throw new ValidationError(`${field} must be one of string, number, integer, boolean, object, json`);
   }
   return normalized as TaskDefinitionFieldType;
 }
 
-function normalizeValueByRule(value: unknown, field: string, rule: TaskDefinitionFieldRule): string | number | boolean {
+function normalizeValueByRule(value: unknown, field: string, rule: TaskDefinitionFieldRule): JsonValue {
   if (rule.type === 'string') {
     return requireString(value, field);
   }
@@ -171,6 +183,14 @@ function normalizeValueByRule(value: unknown, field: string, rule: TaskDefinitio
     throw new ValidationError(`${field} must be a boolean`);
   }
 
+  if (rule.type === 'object') {
+    return structuredClone(requirePlainObject(value, field)) as JsonObject;
+  }
+
+  if (rule.type === 'json') {
+    return normalizeJsonValue(value, field);
+  }
+
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
     throw new ValidationError(`${field} must be a ${rule.type}`);
@@ -186,11 +206,46 @@ function normalizeValueByRule(value: unknown, field: string, rule: TaskDefinitio
   return normalized;
 }
 
-function normalizeDefaultValue(value: unknown, field: string, rule: TaskDefinitionFieldRule): string | number | boolean {
+function normalizeDefaultValue(value: unknown, field: string, rule: TaskDefinitionFieldRule): JsonValue {
   if (rule.type === 'string') {
     return String(value ?? '');
   }
   return normalizeValueByRule(value, field, rule);
+}
+
+function isNumericFieldType(type: TaskDefinitionFieldType): type is 'number' | 'integer' {
+  return type === 'number' || type === 'integer';
+}
+
+function normalizeJsonValue(value: unknown, field: string): JsonValue {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === 'string' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new ValidationError(`${field} must be JSON-compatible`);
+    }
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item, index) => normalizeJsonValue(item, `${field}[${index}]`));
+  }
+
+  if (isPlainObject(value)) {
+    const normalized: JsonObject = {};
+    for (const [key, child] of Object.entries(value)) {
+      normalized[key] = normalizeJsonValue(child, `${field}.${key}`);
+    }
+    return normalized;
+  }
+
+  throw new ValidationError(`${field} must be JSON-compatible`);
 }
 
 function validateFieldPath(fieldPath: string): void {
@@ -255,6 +310,13 @@ function requireObject(value: unknown, field: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function requirePlainObject(value: unknown, field: string): Record<string, unknown> {
+  if (!isPlainObject(value)) {
+    throw new ValidationError(`${field} must be an object`);
+  }
+  return value;
+}
+
 function requireString(value: unknown, field: string): string {
   const normalized = optionalString(value);
   if (!normalized) {
@@ -295,6 +357,20 @@ function normalizeOptionalNumber(value: unknown, field: string): number | undefi
   return normalized;
 }
 
-function isMissingValue(value: unknown): boolean {
-  return value === undefined || value === null || value === '';
+function isMissingValue(value: unknown, rule: TaskDefinitionFieldRule): boolean {
+  if (value === undefined || value === '') {
+    return true;
+  }
+  if (value === null) {
+    return rule.type !== 'object' && rule.type !== 'json';
+  }
+  return false;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
