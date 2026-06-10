@@ -108,7 +108,7 @@ test('parseGeneratedBlenderScriptResponse rejects scripts that do not use bpy', 
         summary: 'not a blender script',
       }),
     ),
-  ).toThrow('Codex returned a script that does not import or use bpy.');
+  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
 });
 
 test('parseGeneratedBlenderScriptResponse rejects bpy false positives from strings and comments', () => {
@@ -120,7 +120,7 @@ test('parseGeneratedBlenderScriptResponse rejects bpy false positives from strin
         summary: 'string false positive',
       }),
     ),
-  ).toThrow('Codex returned a script that does not import or use bpy.');
+  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
 
   expect(() =>
     parseGeneratedBlenderScriptResponse(
@@ -130,7 +130,29 @@ test('parseGeneratedBlenderScriptResponse rejects bpy false positives from strin
         summary: 'comment false positive',
       }),
     ),
-  ).toThrow('Codex returned a script that does not import or use bpy.');
+  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
+});
+
+test('parseGeneratedBlenderScriptResponse rejects bpy alias imports to keep validation style strict', () => {
+  expect(() =>
+    parseGeneratedBlenderScriptResponse(
+      JSON.stringify({
+        notes: ['alias import'],
+        script: 'import bpy as bp\nbp.ops.object.select_all()\n',
+        summary: 'alias import',
+      }),
+    ),
+  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
+
+  expect(() =>
+    parseGeneratedBlenderScriptResponse(
+      JSON.stringify({
+        notes: ['from import'],
+        script: 'from bpy import ops\nops.object.select_all()\n',
+        summary: 'from import',
+      }),
+    ),
+  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
 });
 
 test('parseGeneratedBlenderScriptResponse accepts a real Blender script shape', () => {
@@ -287,6 +309,7 @@ test('buildBlenderScriptPrompt includes workflow context, identifiers, update pr
   expect(prompt).toContain('Reference image path: /tmp/shot-010.png');
   expect(prompt).toContain('Update prompt: Add a glass canopy and sharper rim light.');
   expect(prompt).toContain('"schema_version": "pace-1"');
+  expect(prompt).toContain('Use exactly `import bpy` and direct `bpy.` access; do not alias `bpy` or use `from bpy import ...`.');
   expect(prompt).toContain('Always create at least one mesh named with MODEL_ID.');
   expect(prompt).toContain('Do not save files; the worker wrapper saves .blend, OBJ, preview PNG, PACE, and summary.');
 });

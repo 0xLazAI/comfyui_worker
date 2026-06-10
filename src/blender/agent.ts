@@ -73,6 +73,7 @@ export function buildBlenderScriptPrompt(
     'Hard requirements:',
     '- The script must be self-contained and executable in Blender background mode.',
     '- Use Python and bpy only; do not require UI operators, paid addons, internet, or external assets.',
+    '- Use exactly `import bpy` and direct `bpy.` access; do not alias `bpy` or use `from bpy import ...`.',
     '- Use globals if present: PACE, TASK_ID, MODEL_ID, SCENE_ID, SHOT_ID, OUTPUT_DIR.',
     '- Clear the scene, create visible geometry, set camera and lights, and set a 1..120 frame range.',
     '- Always create at least one mesh named with MODEL_ID.',
@@ -141,7 +142,7 @@ function validateGeneratedBlenderScriptResponse(value: unknown): GeneratedBlende
   const summary = requireNonEmptyString(typed.summary, 'summary');
 
   if (!isValidBlenderScript(script)) {
-    throw new Error('Codex returned a script that does not import or use bpy.');
+    throw new Error('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
   }
 
   return { notes, script, summary };
@@ -164,10 +165,7 @@ function requireNonEmptyString(value: unknown, field: string): string {
 
 function isValidBlenderScript(script: string): boolean {
   const normalized = stripPythonCommentsAndStrings(script);
-  const hasBpyImport =
-    /(?:^|\n)\s*(?:import\s+bpy\b(?:\s+as\s+[A-Za-z_]\w*)?|from\s+bpy(?:\.[A-Za-z_]\w*)*\s+import\b)/m.test(
-      normalized,
-    );
+  const hasBpyImport = /(?:^|\n)\s*import\s+bpy\s*(?:\n|$)/m.test(normalized);
   const hasBpyAccess = /\bbpy\.[A-Za-z_]\w*/.test(normalized);
 
   return hasBpyImport && hasBpyAccess;
