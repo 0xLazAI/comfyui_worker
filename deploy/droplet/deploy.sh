@@ -38,6 +38,8 @@ ssh "${DEPLOY_TARGET}" \
     cd \"${APP_DIR}\"
     git remote set-url origin \"${REPO_URL}\"
     git fetch --prune --tags origin
+    git reset --hard
+    git clean -fd
     if git show-ref --verify --quiet \"refs/remotes/origin/${DEPLOY_REF}\"; then
       git checkout -B \"${DEPLOY_REF}\" \"origin/${DEPLOY_REF}\"
       git reset --hard \"origin/${DEPLOY_REF}\"
