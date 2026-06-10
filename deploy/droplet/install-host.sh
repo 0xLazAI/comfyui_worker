@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/comfyui-worker}"
-REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-${APP_DIR}/.env}"
+REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-/etc/comfyui-worker/.env}"
 WEBDAV_URL="${PAI_WEBDAV_URL:?PAI_WEBDAV_URL is required}"
 WEBDAV_USERNAME="${PAI_WEBDAV_USERNAME:?PAI_WEBDAV_USERNAME is required}"
 WEBDAV_PASSWORD="${PAI_WEBDAV_PASSWORD:?PAI_WEBDAV_PASSWORD is required}"
@@ -87,6 +87,7 @@ ensure_nodejs() {
 ensure_nodejs
 
 mkdir -p "${WEBDAV_MOUNT_POINT}" "${DATA_PROJECTS_ROOT}" /var/cache/pai /var/tmp/pai /var/log/pai
+mkdir -p "$(dirname "${REMOTE_ENV_FILE}")"
 
 touch "${DAVFS_SECRETS_FILE}"
 chmod 600 "${DAVFS_SECRETS_FILE}"
@@ -128,6 +129,11 @@ mkdir -p "${DATA_PROJECTS_ROOT}/.pai-workers"
 if [[ ! -f "${REMOTE_ENV_FILE}" ]]; then
   echo "Missing env file: ${REMOTE_ENV_FILE}" >&2
   exit 1
+fi
+
+LEGACY_ENV_FILE="${APP_DIR}/.env"
+if [[ "${REMOTE_ENV_FILE}" != "${LEGACY_ENV_FILE}" && -f "${LEGACY_ENV_FILE}" ]]; then
+  rm -f "${LEGACY_ENV_FILE}"
 fi
 
 upsert_env_value() {
