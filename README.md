@@ -65,6 +65,231 @@ worker 收到文件后会先上传到对象存储，再自动写回 `payload.inp
 - 输入图片可以直接传 `assets://`，也可以通过 `multipart/form-data` 上传源文件
 - `backend`、`base_model`、`positive`、`negative` 不属于公共 contract，不允许直接出现在 payload 顶层
 
+## Add A New Task
+
+这套 worker 现在不是把 `task_type` 写死在 HTTP 路由里，而是拆成两层：
+
+- 代码层负责实现 `consumer`
+- 数据库里的 `task_type_definitions` 负责声明：
+  - 哪个 `task_type` 走哪个 `consumer_key`
+  - payload 允许哪些字段
+  - 哪些字段必填
+  - 哪些字段有默认值
+
+也就是说，接一个新任务时，不是只改代码，也不是只改数据库，而是两边都要补齐。
+
+### 1. 先实现 Consumer
+
+每个新任务最终都要落到一个 `consumer_key`。
+
+当前分发入口在：
+
+- [taskExecution.ts](/Users/maozhijian/Documents/GitHub/comfyui_worker/src/tasks/taskExecution.ts:1)
+
+关键点：
+
+- `handleTaskExecute(...)` 会先从 `worker_tasks.request_payload._taskDefinition.consumerKey` 里读 `consumer_key`
+- 然后到 `CONSUMER_HANDLERS` 里找具体 handler
+- `supportsConsumerKey(...)` 也基于同一个 map 做校验
+
+所以新增任务最少要做两件事：
+
+1. 新增一个 handler  
+   例如：
+   - `handleUpscalePanelExecute(...)`
+   - `handleExtractMaskExecute(...)`
+
+2. 把它注册进 `CONSUMER_HANDLERS`  
+   例如：
+
+```ts
+const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
+  render_panel_consumer: handleRenderPanelExecute,
+  upscale_panel_consumer: handleUpscalePanelExecute,
+};
+```
+
+如果 `consumer_key` 没注册：
+
+- `POST /task-definitions` 会直接拒绝
+- 即使手工写进数据库，消费时也会报 `Unsupported consumer_key`
+
+### 2. 定义这个 Task Type 的 Payload
+
+任务定义存在表：
+
+- `task_type_definitions`
+
+关键字段是：
+
+- `task_type`
+- `version`
+- `enabled`
+- `description`
+- `definition_json`
+- `created_at`
+- `updated_at`
+- `created_by`
+- `updated_by`
+
+这里真正决定校验规则的是 `definition_json`。
+
+结构如下：
+
+```json
+{
+  "consumer_key": "render_panel_consumer",
+  "payload": {
+    "allow_unknown_fields": false,
+    "fields": {
+      "workflow": {
+        "type": "string",
+        "required": true
+      },
+      "panelId": {
+        "type": "string",
+        "required": true
+      },
+      "prompt.text": {
+        "type": "string",
+        "required": true
+      },
+      "prompt.negativeText": {
+        "type": "string",
+        "required": false,
+        "default": ""
+      },
+      "seed": {
+        "type": "integer",
+        "required": false
+      },
+      "extraParams.denoise": {
+        "type": "number",
+        "required": false,
+        "default": 0.76,
+        "minimum": 0,
+        "maximum": 1
+      }
+    }
+  }
+}
+```
+
+规则说明：
+
+- `type` 目前只支持：
+  - `string`
+  - `number`
+  - `integer`
+  - `boolean`
+- `required=true` 表示不传就报错
+- `default` 表示缺省时自动补齐
+- `allow_unknown_fields=false` 表示 payload 里不能出现未声明字段
+
+标准化逻辑在：
+
+- [definitionSchema.ts](/Users/maozhijian/Documents/GitHub/comfyui_worker/src/taskDefinitions/definitionSchema.ts:1)
+
+### 3. 把 Task Definition 写进数据库
+
+任务定义可以通过管理接口增删改查：
+
+- `GET /task-definitions`
+- `GET /task-definitions/:id`
+- `POST /task-definitions`
+- `PUT /task-definitions/:id`
+- `DELETE /task-definitions/:id`
+
+这组接口需要：
+
+- `Authorization: Bearer <COMFYUI_WORKER_TOKEN>`
+
+创建一个新任务定义的例子：
+
+```bash
+curl -X POST 'http://host/task-definitions' \
+  -H 'Authorization: Bearer YOUR_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -H 'x-operator: maozhijian' \
+  --data-raw '{
+    "task_type": "upscale_panel",
+    "version": 1,
+    "enabled": true,
+    "description": "对 panel 结果图做放大。",
+    "definition_json": {
+      "consumer_key": "upscale_panel_consumer",
+      "payload": {
+        "allow_unknown_fields": false,
+        "fields": {
+          "panelId": { "type": "string", "required": true },
+          "inputs.image.assetUri": { "type": "string", "required": true },
+          "scale": { "type": "integer", "required": false, "default": 2, "minimum": 2, "maximum": 4 }
+        }
+      }
+    }
+  }'
+```
+
+几个约束：
+
+- 同一个 `task_type + version` 不能重复
+- 同一个 `task_type` 同时只应该有一个 `enabled=true` 的版本
+- `consumer_key` 必须是代码里已经支持的 key
+
+### 4. 提交任务时会发生什么
+
+`POST /tasks` 收到请求后，会：
+
+1. 按顶层 `task_type` 查启用中的定义
+2. 按 `definition_json` 校验 `payload`
+3. 自动补默认值
+4. 把标准化后的 payload 写进 `worker_tasks.request_payload`
+5. 同时把任务定义绑定信息写进：
+   - `request_payload._taskDefinition`
+   - `request_payload._taskRuntime`
+6. 入 Redis 队列
+
+所以消费端拿到的不是原始 payload，而是已经补齐默认值的标准化 payload。
+
+这点很重要：
+
+- 你后面改了 `task_type_definitions`
+- 不会影响已经入队的旧任务
+
+因为旧任务执行时会优先使用它自己请求快照里固化的：
+
+- `consumerKey`
+- `definitionId`
+- `version`
+
+### 5. 新任务接入的最小 Checklist
+
+新增一个 `task_type`，建议按这个顺序做：
+
+1. 先确定 `consumer_key`
+2. 写具体 handler
+3. 把 `consumer_key -> handler` 注册到 `CONSUMER_HANDLERS`
+4. 如果需要，补对应的 provider / asset / sidecar 逻辑
+5. 通过 `POST /task-definitions` 创建启用中的定义
+6. 调 `GET /capabilities` 确认新 `task_type` 已经暴露
+7. 用 `POST /tasks` 提一条最小任务
+8. 轮询 `GET /tasks/{task_id}` 验证最终状态
+
+### 6. 对外新增 Task Type 时要注意什么
+
+这套架构里：
+
+- `task_type` 决定业务路由
+- `consumer_key` 决定代码执行逻辑
+- `definition_json` 决定 payload 规则
+
+所以：
+
+- 如果只是改参数校验或默认值，可以只改 `task_type_definitions`
+- 如果要接一类全新的业务逻辑，必须先补代码里的 `consumer`
+
+另外，`GET /capabilities` 返回的 `supported_tasks` 是从数据库里启用中的定义动态生成的，不是硬编码列表。
+
 ## Storage
 
 项目目录只写 metadata sidecar：
