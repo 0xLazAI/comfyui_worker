@@ -53,7 +53,7 @@ export async function uploadRenderAsset(
     filenameHint?: string;
   },
 ): Promise<UploadedAsset> {
-  return uploadAsset(projectId, 'renders', input);
+  return uploadWorkerAsset(projectId, 'renders', input);
 }
 
 export async function uploadSourceImageAsset(
@@ -64,12 +64,12 @@ export async function uploadSourceImageAsset(
     filenameHint?: string;
   },
 ): Promise<UploadedAsset> {
-  return uploadAsset(projectId, 'uploads', input);
+  return uploadWorkerAsset(projectId, 'uploads', input);
 }
 
-async function uploadAsset(
+export async function uploadWorkerAsset(
   projectId: string,
-  assetGroup: string,
+  group: string,
   input: {
     buffer: Buffer;
     contentType?: string;
@@ -78,7 +78,7 @@ async function uploadAsset(
 ): Promise<UploadedAsset> {
   const extension = detectExtension(input.filenameHint, input.contentType);
   const filename = `${utcDateStamp()}-${randomBytes(4).toString('base64url')}.${extension}`;
-  const assetUri = `assets://${assetGroup}/${filename}`;
+  const assetUri = `assets://${group}/${filename}`;
   const key = buildObjectKey(projectId, assetUri);
   const contentType = input.contentType || guessContentTypeFromFilename(filename);
 
@@ -150,12 +150,21 @@ function renderPrefixTemplate(template: string, projectId: string): string {
 
 function detectExtension(filenameHint?: string, contentType?: string): string {
   const hinted = String(filenameHint || '').trim().toLowerCase();
-  const matched = /\.(png|jpg|jpeg|webp)$/i.exec(hinted);
+  const matched = /\.([a-z0-9]+)$/i.exec(hinted);
   if (matched?.[1]) {
-    return matched[1] === 'jpeg' ? 'jpg' : matched[1];
+    const extension = matched[1] === 'jpeg' ? 'jpg' : matched[1];
+    if (isSupportedExtension(extension)) {
+      return extension;
+    }
   }
 
   const normalizedType = String(contentType || '').toLowerCase();
+  if (normalizedType.includes('x-blender')) {
+    return 'blend';
+  }
+  if (normalizedType.includes('model/obj')) {
+    return 'obj';
+  }
   if (normalizedType.includes('png')) {
     return 'png';
   }
@@ -165,18 +174,40 @@ function detectExtension(filenameHint?: string, contentType?: string): string {
   if (normalizedType.includes('webp')) {
     return 'webp';
   }
+  if (normalizedType.includes('json')) {
+    return 'json';
+  }
+  if (normalizedType.includes('x-python')) {
+    return 'py';
+  }
   return 'png';
 }
 
 function guessContentTypeFromFilename(filename: string): string {
   const normalized = filename.toLowerCase();
+  if (normalized.endsWith('.blend')) {
+    return 'application/x-blender';
+  }
+  if (normalized.endsWith('.obj')) {
+    return 'model/obj';
+  }
   if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
     return 'image/jpeg';
   }
   if (normalized.endsWith('.webp')) {
     return 'image/webp';
   }
+  if (normalized.endsWith('.json')) {
+    return 'application/json';
+  }
+  if (normalized.endsWith('.py')) {
+    return 'text/x-python';
+  }
   return 'image/png';
+}
+
+function isSupportedExtension(extension: string): boolean {
+  return ['blend', 'obj', 'png', 'jpg', 'webp', 'json', 'py'].includes(extension);
 }
 
 function utcDateStamp(): string {
