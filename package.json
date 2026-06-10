@@ -6,7 +6,7 @@
   "scripts": {
     "compile": "tsc",
     "test": "vitest run",
-    "test:watch": "vitest",
+    "test:watch": "vitest watch",
     "start": "npm run compile && node ./dist/index.js",
     "server": "npm run compile && node ./dist/index.js",
     "queue:worker": "npm run compile && node ./dist/queue/worker-cli.js"
