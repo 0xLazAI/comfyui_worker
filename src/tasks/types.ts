@@ -91,6 +91,11 @@ export interface SubmitTaskInput {
   projectId: string;
   projectRoot: string;
   payload: Record<string, unknown>;
+  sourceImageUpload?: {
+    buffer: Buffer;
+    contentType?: string | null;
+    filename?: string | null;
+  } | null;
   requestId?: string | null;
   dedupeKey?: string | null;
 }

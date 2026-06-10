@@ -53,9 +53,32 @@ export async function uploadRenderAsset(
     filenameHint?: string;
   },
 ): Promise<UploadedAsset> {
+  return uploadAsset(projectId, 'renders', input);
+}
+
+export async function uploadSourceImageAsset(
+  projectId: string,
+  input: {
+    buffer: Buffer;
+    contentType?: string;
+    filenameHint?: string;
+  },
+): Promise<UploadedAsset> {
+  return uploadAsset(projectId, 'uploads', input);
+}
+
+async function uploadAsset(
+  projectId: string,
+  assetGroup: string,
+  input: {
+    buffer: Buffer;
+    contentType?: string;
+    filenameHint?: string;
+  },
+): Promise<UploadedAsset> {
   const extension = detectExtension(input.filenameHint, input.contentType);
   const filename = `${utcDateStamp()}-${randomBytes(4).toString('base64url')}.${extension}`;
-  const assetUri = `assets://renders/${filename}`;
+  const assetUri = `assets://${assetGroup}/${filename}`;
   const key = buildObjectKey(projectId, assetUri);
   const contentType = input.contentType || guessContentTypeFromFilename(filename);
 

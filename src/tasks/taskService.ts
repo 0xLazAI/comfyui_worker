@@ -8,6 +8,7 @@ import {
 import { ValidationError } from '../infra/HttpError.js';
 import { currentRequestId } from '../infra/logger.js';
 import { createQueueJobEnvelope } from '../queue/types.js';
+import { uploadSourceImageAsset } from '../render/assetStore.js';
 import { normalizeProjectRoot } from '../render/payload.js';
 import {
   attachTaskDefinitionBinding,
@@ -48,9 +49,10 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
   }
 
   const normalizedProjectRoot = normalizeProjectRoot(input.projectRoot);
+  const payloadWithSourceImage = await attachUploadedSourceImage(input.projectId, input.payload, input.sourceImageUpload);
   const payload = attachRuntimeMetadata(
     attachTaskDefinitionBinding(
-      normalizePayloadWithDefinition(structuredClone(input.payload), definition.definitionJson),
+      normalizePayloadWithDefinition(structuredClone(payloadWithSourceImage), definition.definitionJson),
       {
         definitionId: definition.id,
         version: definition.version,
@@ -121,6 +123,59 @@ function attachRuntimeMetadata(payload: Record<string, unknown>, projectRoot: st
     projectRoot,
   };
   return normalized;
+}
+
+async function attachUploadedSourceImage(
+  projectId: string,
+  payload: Record<string, unknown>,
+  sourceImageUpload: SubmitTaskInput['sourceImageUpload'],
+): Promise<Record<string, unknown>> {
+  if (!sourceImageUpload) {
+    return payload;
+  }
+
+  const normalized = structuredClone(payload || {});
+  const existingAssetUri = readExistingInputAssetUri(normalized);
+  if (existingAssetUri) {
+    throw new ValidationError('payload.inputs.image.assetUri cannot be provided together with source_image upload');
+  }
+
+  const uploaded = await uploadSourceImageAsset(projectId, {
+    buffer: sourceImageUpload.buffer,
+    contentType: sourceImageUpload.contentType || undefined,
+    filenameHint: sourceImageUpload.filename || undefined,
+  });
+
+  const inputs = ensureObjectField(normalized, 'inputs');
+  const image = ensureObjectField(inputs, 'image');
+  image.assetUri = uploaded.assetUri;
+
+  return normalized;
+}
+
+function readExistingInputAssetUri(payload: Record<string, unknown>): string {
+  const inputs = payload.inputs;
+  if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) {
+    return '';
+  }
+  const inputMap = inputs as Record<string, unknown>;
+  const imageAssetUri = String(inputMap.imageAssetUri || '').trim();
+  if (imageAssetUri) {
+    return imageAssetUri;
+  }
+  const image = inputMap.image;
+  if (!image || typeof image !== 'object' || Array.isArray(image)) {
+    return '';
+  }
+  return String((image as Record<string, unknown>).assetUri || '').trim();
+}
+
+function ensureObjectField(target: Record<string, unknown>, key: string): Record<string, unknown> {
+  const existing = target[key];
+  if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
+    target[key] = {};
+  }
+  return target[key] as Record<string, unknown>;
 }
 
 export async function getTaskResponse(taskId: string): Promise<PublicTaskResponse | null> {

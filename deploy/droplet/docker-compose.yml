@@ -1,0 +1,17 @@
+services:
+  comfyui-worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: comfyui-worker:droplet
+    container_name: comfyui-worker
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - "${HOST_HTTP_PORT:-8091}:${COMFYUI_WORKER_PORT:-8091}"
+    volumes:
+      - ${PAI_WEBDAV_MOUNT_POINT:-/mnt/pai-projects}:/data/pai-projects:rw
+      - /var/cache/pai:/var/cache/pai
+      - /var/tmp/pai:/var/tmp/pai
+      - /var/log/pai:/var/log/pai

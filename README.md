@@ -50,11 +50,19 @@
 }
 ```
 
+也支持 `multipart/form-data` 直接上传源图文件：
+
+- 文本字段：`task_id`、`task_type`、`project_id`、`project_root`
+- 文本字段：`payload`，值是 JSON 字符串
+- 文件字段：`source_image`，兼容别名 `image`
+
+worker 收到文件后会先上传到对象存储，再自动写回 `payload.inputs.image.assetUri`，后面的任务流程不变。
+
 约束：
 
 - `workflow` 必填
 - `panelId` 必须符合 `scene_<id>_shot_<id>_panel_<id>`
-- 输入图片必须使用 `assets://`
+- 输入图片可以直接传 `assets://`，也可以通过 `multipart/form-data` 上传源文件
 - `backend`、`base_model`、`positive`、`negative` 不属于公共 contract，不允许直接出现在 payload 顶层
 
 ## Storage
@@ -167,6 +175,54 @@ PAI_PROJECTS_EXPECT_SHARED_FS=false
 ```
 
 这样语义上就不会假装自己有共享挂载。
+
+## Droplet Deployment
+
+如果你要真正挂载共享项目目录，推荐直接用 Droplet。
+
+这套仓库已经带了：
+
+- [deploy/droplet/deploy.sh](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/deploy.sh)
+- [deploy/droplet/install-host.sh](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/install-host.sh)
+- [deploy/droplet/docker-compose.yml](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/docker-compose.yml)
+- [deploy/droplet/droplet.env.example](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/droplet.env.example)
+
+容器内现在由 `supervisord` 同时维护：
+
+- HTTP server
+- queue worker
+
+也就是说，Droplet 上只需要起一个容器。
+
+部署步骤：
+
+1. 复制一份 `deploy/droplet/droplet.env.example` 为 `deploy/droplet/droplet.env`
+2. 填好：
+   - `DEPLOY_HOST`
+   - `PAI_WEBDAV_URL`
+   - `PAI_WEBDAV_USERNAME`
+   - `PAI_WEBDAV_PASSWORD`
+   - `LOCAL_ENV_FILE`
+3. 确保本地 `.env` 已经填好 PostgreSQL / Redis / S3 / Stephen 配置
+4. 执行：
+
+```bash
+cd /Users/maozhijian/Documents/GitHub/comfyui_worker
+bash deploy/droplet/deploy.sh
+```
+
+这个脚本会做：
+
+- 把当前仓库同步到 Droplet
+- 上传 `.env` 到远端
+- 安装 `docker.io`、`docker compose`、`davfs2`
+- 把 WebDAV 挂到宿主机 `${PAI_WEBDAV_MOUNT_POINT}`
+- 用 Docker Compose 起一个 `comfyui-worker` 容器
+
+最终挂载关系是：
+
+- 宿主机：`${PAI_WEBDAV_MOUNT_POINT}`
+- 容器内：`/data/pai-projects`
 
 ## Required Env
 

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import cors from 'cors';
 import express from 'express';
 import rTracer from 'cls-rtracer';
+import multer from 'multer';
 import { errorHandler } from './infra/errorHandler.js';
 import { currentRequestId } from './infra/logger.js';
 import { UnauthorizedError, ValidationError, NotFoundError } from './infra/HttpError.js';
@@ -16,6 +17,20 @@ function parseObjectBody(value: unknown, field: string): Record<string, unknown>
     throw new ValidationError(`${field} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function parsePayloadBody(value: unknown): Record<string, unknown> {
+  if (value === undefined || value === null || value === '') {
+    return {};
+  }
+  if (typeof value === 'string') {
+    try {
+      return parseObjectBody(JSON.parse(value), 'payload');
+    } catch {
+      throw new ValidationError('payload must be valid JSON when sent as string');
+    }
+  }
+  return parseObjectBody(value, 'payload');
 }
 
 function requireString(value: unknown, field: string): string {
@@ -69,6 +84,13 @@ function requireBearer(authorization: string | undefined): void {
 
 export function createApp(): express.Express {
   const app = express();
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: 20 * 1024 * 1024,
+      files: 1,
+    },
+  });
   const tracer = (rTracer as any).expressMiddleware({
     useHeader: true,
     headerName: 'x-request-id',
@@ -95,15 +117,20 @@ export function createApp(): express.Express {
     });
   });
 
-  app.post('/tasks', async (req, res) => {
+  app.post('/tasks', upload.fields([
+    { name: 'source_image', maxCount: 1 },
+    { name: 'image', maxCount: 1 },
+  ]), async (req, res) => {
     const body = parseObjectBody(req.body, 'body');
-    const payload = body.payload === undefined ? {} : parseObjectBody(body.payload, 'payload');
+    const payload = parsePayloadBody(body.payload);
+    const sourceImageUpload = extractSourceImageUpload(req);
     const response = await submitTask({
       taskId: requireString(body.task_id, 'task_id'),
       taskType: requireString(body.task_type, 'task_type'),
       projectId: requireString(body.project_id, 'project_id'),
       projectRoot: requireString(body.project_root, 'project_root'),
       payload,
+      sourceImageUpload,
       requestId: currentRequestId() ?? null,
       dedupeKey: optionalString(req.header('x-idempotency-key') || req.header('idempotency-key')),
     });
@@ -187,4 +214,28 @@ export function createApp(): express.Express {
 
   app.use(errorHandler);
   return app;
+}
+
+function extractSourceImageUpload(req: express.Request): {
+  buffer: Buffer;
+  contentType?: string | null;
+  filename?: string | null;
+} | null {
+  const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+  const file = files?.source_image?.[0] || files?.image?.[0] || null;
+  if (!file) {
+    return null;
+  }
+
+  const contentType = String(file.mimetype || '').trim().toLowerCase();
+  const filename = String(file.originalname || '').trim();
+  if (contentType && !contentType.startsWith('image/')) {
+    throw new ValidationError('source_image must be an image file');
+  }
+
+  return {
+    buffer: file.buffer,
+    contentType: contentType || null,
+    filename: filename || null,
+  };
 }
