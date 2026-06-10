@@ -184,21 +184,23 @@ PAI_PROJECTS_EXPECT_SHARED_FS=false
 
 - [deploy/droplet/deploy.sh](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/deploy.sh)
 - [deploy/droplet/install-host.sh](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/install-host.sh)
-- [deploy/droplet/docker-compose.yml](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/docker-compose.yml)
+- [deploy/droplet/comfyui-worker-server.service](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/comfyui-worker-server.service)
+- [deploy/droplet/comfyui-worker-consumer.service](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/comfyui-worker-consumer.service)
 - [deploy/droplet/droplet.env.example](/Users/maozhijian/Documents/GitHub/comfyui_worker/deploy/droplet/droplet.env.example)
 
-容器内现在由 `supervisord` 同时维护：
+Droplet 版现在是宿主机直跑，不再依赖 Docker。  
+代码会直接从 GitHub 仓库拉到宿主机，再由 `systemd` 维护：
 
 - HTTP server
 - queue worker
-
-也就是说，Droplet 上只需要起一个容器。
 
 部署步骤：
 
 1. 复制一份 `deploy/droplet/droplet.env.example` 为 `deploy/droplet/droplet.env`
 2. 填好：
    - `DEPLOY_HOST`
+   - `REPO_URL`
+   - `DEPLOY_REF`
    - `PAI_WEBDAV_URL`
    - `PAI_WEBDAV_USERNAME`
    - `PAI_WEBDAV_PASSWORD`
@@ -213,16 +215,18 @@ bash deploy/droplet/deploy.sh
 
 这个脚本会做：
 
-- 把当前仓库同步到 Droplet
-- 上传 `.env` 到远端
-- 安装 `docker.io`、`docker compose`、`davfs2`
+- 让 Droplet 从 GitHub clone / fetch 仓库
+- 上传本地 `.env` 到远端 `${APP_DIR}/.env`
+- 安装 `nodejs`、`git`、`davfs2`
 - 把 WebDAV 挂到宿主机 `${PAI_WEBDAV_MOUNT_POINT}`
-- 用 Docker Compose 起一个 `comfyui-worker` 容器
+- 再 bind 到宿主机 `/data/pai-projects`
+- `npm ci && npm run compile`
+- 安装并重启两个 `systemd` 服务
 
 最终挂载关系是：
 
-- 宿主机：`${PAI_WEBDAV_MOUNT_POINT}`
-- 容器内：`/data/pai-projects`
+- WebDAV：`${PAI_WEBDAV_MOUNT_POINT}`
+- 应用实际使用：`/data/pai-projects`
 
 ## Required Env
 
