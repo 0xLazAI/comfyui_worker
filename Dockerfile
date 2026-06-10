@@ -7,7 +7,6 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
-COPY db ./db
 
 RUN npm run compile && npm prune --omit=dev
 
