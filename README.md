@@ -1,6 +1,6 @@
 # ComfyUI Worker
 
-一个对齐 PAI worker contract 的 `render_panel` worker。
+一个对齐 PAI worker contract 的 worker，内置 `render_panel` 和 `blender` 两种 task type。
 
 对外：
 
@@ -23,9 +23,10 @@
 
 ## Task Contract
 
-当前只支持：
+当前内置 task type：
 
 - `task_type = render_panel`
+- `task_type = blender`
 
 `payload` 采用通用结构：
 
@@ -185,6 +186,13 @@ const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
 - `required=true` 表示不传就报错
 - `default` 表示缺省时自动补齐
 - `allow_unknown_fields=false` 表示 payload 里不能出现未声明字段
+
+启动时，worker 会自动补齐内置 task definition seed：
+
+- `render_panel`
+- `blender`
+
+其中 `blender` 的内置定义只覆盖通用 contract 字段；不同 workflow 的更细粒度必填约束仍由 `src/blender/payload.ts` 处理。
 
 标准化逻辑在：
 
@@ -474,6 +482,11 @@ bash deploy/droplet/deploy.sh
   - `REDIS_URL`
 - Stephen provider
   - `STEPHEN_RENDER_BASE_URL`
+- Blender provider
+  - `BLENDER_API_BASE_URL`
+  - `BLENDER_API_TOKEN`
+  - `BLENDER_API_POLL_INTERVAL_SECONDS`
+  - `BLENDER_API_TIMEOUT_SECONDS`
 - S3 / object storage
   - `PAI_ASSET_ENDPOINT`
   - `PAI_ASSET_BUCKET`

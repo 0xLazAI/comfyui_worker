@@ -10,6 +10,8 @@ import type {
 import { RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
 
 const DEFAULT_TASK_DEFINITION_DESCRIPTION = '默认的 render_panel 任务定义。';
+const DEFAULT_BLENDER_TASK_DEFINITION_DESCRIPTION = '默认的 blender 任务定义。';
+const BLENDER_TASK_TYPE = 'blender';
 const SYSTEM_ACTOR = 'system';
 
 export class TaskTypeDefinitionStore {
@@ -211,7 +213,13 @@ export class TaskTypeDefinitionStore {
   }
 
   private async ensureBuiltInDefinitions(): Promise<void> {
-    const existing = await this.getEnabledByTaskType(RENDER_PANEL_TASK_TYPE);
+    for (const definition of BUILT_IN_TASK_DEFINITIONS) {
+      await this.ensureBuiltInDefinition(definition);
+    }
+  }
+
+  private async ensureBuiltInDefinition(definition: BuiltInTaskDefinitionSeed): Promise<void> {
+    const existing = await this.getEnabledByTaskType(definition.taskType);
     if (existing) {
       return;
     }
@@ -221,18 +229,18 @@ export class TaskTypeDefinitionStore {
       `SELECT COUNT(*) AS count
       FROM task_type_definitions
       WHERE task_type = $1`,
-      [RENDER_PANEL_TASK_TYPE],
+      [definition.taskType],
     );
     if (Number(count.rows[0]?.count || 0) > 0) {
       return;
     }
 
     await this.create({
-      taskType: RENDER_PANEL_TASK_TYPE,
+      taskType: definition.taskType,
       version: 1,
       enabled: true,
-      description: DEFAULT_TASK_DEFINITION_DESCRIPTION,
-      definitionJson: defaultRenderPanelDefinitionJson(),
+      description: definition.description,
+      definitionJson: definition.definitionJson(),
       actor: SYSTEM_ACTOR,
     }).catch((error: any) => {
       if (error?.code !== '23505') {
@@ -243,6 +251,25 @@ export class TaskTypeDefinitionStore {
 }
 
 export const taskTypeDefinitionStore = new TaskTypeDefinitionStore();
+
+type BuiltInTaskDefinitionSeed = {
+  taskType: string;
+  description: string;
+  definitionJson: () => TaskDefinitionJson;
+};
+
+const BUILT_IN_TASK_DEFINITIONS: BuiltInTaskDefinitionSeed[] = [
+  {
+    taskType: RENDER_PANEL_TASK_TYPE,
+    description: DEFAULT_TASK_DEFINITION_DESCRIPTION,
+    definitionJson: defaultRenderPanelDefinitionJson,
+  },
+  {
+    taskType: BLENDER_TASK_TYPE,
+    description: DEFAULT_BLENDER_TASK_DEFINITION_DESCRIPTION,
+    definitionJson: defaultBlenderDefinitionJson,
+  },
+];
 
 function mapRowToRecord(row: Record<string, unknown>): TaskTypeDefinitionRecord {
   return {
@@ -337,6 +364,55 @@ function defaultRenderPanelDefinitionJson(): TaskDefinitionJson {
           minimum: 0,
           maximum: 128,
           description: '主体 mask 外扩像素。',
+        },
+      },
+    },
+  });
+}
+
+function defaultBlenderDefinitionJson(): TaskDefinitionJson {
+  return normalizeTaskDefinitionJson({
+    consumer_key: 'blender_consumer',
+    payload: {
+      allow_unknown_fields: false,
+      fields: {
+        workflow: {
+          type: 'string',
+          required: true,
+        },
+        scene_id: {
+          type: 'string',
+          required: true,
+        },
+        shot_id: {
+          type: 'string',
+          required: true,
+        },
+        model_id: {
+          type: 'string',
+          required: false,
+        },
+        prompt: {
+          type: 'string',
+          required: false,
+        },
+        pace: {
+          type: 'object',
+          required: false,
+        },
+        'inputs.image.assetUri': {
+          type: 'string',
+          required: false,
+        },
+        agent: {
+          type: 'string',
+          required: false,
+          default: 'codex',
+        },
+        runner_target: {
+          type: 'string',
+          required: false,
+          default: 'gpu',
         },
       },
     },
