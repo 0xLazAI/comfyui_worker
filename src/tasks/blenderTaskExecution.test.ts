@@ -112,6 +112,7 @@ describe('blender task execution', () => {
     const envelope = createEnvelope(currentRecord.taskId);
     const context = createContext({ attempts: 1, maxAttempts: 3 });
     const sourceBuffer = Buffer.from('image-binary');
+    let stagedPath = '';
 
     downloadAssetMock.mockResolvedValue({
       assetUri: 'assets://uploads/source.png',
@@ -122,7 +123,7 @@ describe('blender task execution', () => {
     generateBlenderScriptMock.mockImplementation(async (_payload, generateContext) => {
       expect(generateContext.workingDirectory).toBe('/data/pai-projects/project-root');
       expect(generateContext.sourceImagePath).toBeTruthy();
-      const stagedPath = String(generateContext.sourceImagePath);
+      stagedPath = String(generateContext.sourceImagePath);
       tempPathsToCleanup.push(stagedPath);
       expect(existsSync(stagedPath)).toBe(true);
       expect(readFileSync(stagedPath)).toEqual(sourceBuffer);
@@ -198,7 +199,7 @@ describe('blender task execution', () => {
       model_id: 'model_task_123',
       run_id: 'run_123',
       runner_status: 'succeeded',
-      artifact_uris: {
+      artifacts: {
         blend: 'assets://blender/scene.blend',
         model_obj: 'assets://blender/model.obj',
         preview: 'assets://blender/preview.png',
@@ -206,7 +207,7 @@ describe('blender task execution', () => {
         pace: 'assets://blender/pace.json',
         generated_script: 'assets://blender/generated_scene.py',
       },
-      artifacts: [
+      artifact_details: [
         expect.objectContaining({ artifact_id: 'scene_blend', kind: 'blend', asset_uri: 'assets://blender/scene.blend' }),
         expect.objectContaining({ artifact_id: 'model_obj', kind: 'model_obj', asset_uri: 'assets://blender/model.obj' }),
         expect.objectContaining({ artifact_id: 'preview_png', kind: 'preview', asset_uri: 'assets://blender/preview.png' }),
@@ -219,6 +220,8 @@ describe('blender task execution', () => {
       status: 'succeeded',
       taskId: 'task_123',
     }));
+    expect(stagedPath).toBeTruthy();
+    expect(existsSync(stagedPath)).toBe(false);
   });
 
   test('passes a staged optional source image to update workflow codex generation and provider submission', async () => {
@@ -293,6 +296,51 @@ describe('blender task execution', () => {
         content_type: 'image/jpeg',
         filename: 'update-source.jpg',
       }),
+    }));
+  });
+
+  test('accepts provider artifacts when semantic kind must be inferred from filename only', async () => {
+    const envelope = createEnvelope(currentRecord.taskId);
+    const context = createContext({ attempts: 1, maxAttempts: 3 });
+
+    arrangeScriptGenerationWithSourceImage();
+    submitBlenderRunMock.mockResolvedValue({
+      run_id: 'run_filename_only',
+      status: 'queued',
+      status_url: '/runs/run_filename_only',
+    });
+    pollBlenderRunUntilTerminalMock.mockResolvedValue({
+      run_id: 'run_filename_only',
+      status: 'succeeded',
+      artifacts: createFilenameOnlyProviderArtifacts(),
+    });
+    for (const artifact of createFilenameOnlyProviderArtifacts()) {
+      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+        buffer: Buffer.from(`${artifact.filename}-binary`),
+        contentType: String(artifact.content_type),
+        filename: String(artifact.filename),
+      });
+      uploadWorkerAssetMock.mockResolvedValueOnce({
+        assetUri: `assets://blender/${artifact.filename}`,
+        bytes: Buffer.byteLength(`${artifact.filename}-binary`),
+        contentType: artifact.content_type,
+        filename: artifact.filename,
+      });
+    }
+
+    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
+    await handleBlenderExecute(envelope, context);
+
+    expect(currentRecord.status).toBe('succeeded');
+    expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
+      artifacts: {
+        blend: 'assets://blender/scene.blend',
+        model_obj: 'assets://blender/model.obj',
+        preview: 'assets://blender/preview.png',
+        summary: 'assets://blender/summary.json',
+        pace: 'assets://blender/pace.json',
+        generated_script: 'assets://blender/generated_scene.py',
+      },
     }));
   });
 
@@ -433,6 +481,17 @@ function createProviderArtifacts() {
     { artifact_id: 'summary_json', filename: 'summary.json', content_type: 'application/json' },
     { artifact_id: 'pace_json', filename: 'pace.json', content_type: 'application/json' },
     { artifact_id: 'generated_scene_py', filename: 'generated_scene.py', content_type: 'text/x-python' },
+  ];
+}
+
+function createFilenameOnlyProviderArtifacts() {
+  return [
+    { artifact_id: 'artifact_001', filename: 'scene.blend', content_type: 'application/x-blender' },
+    { artifact_id: 'artifact_002', filename: 'model.obj', content_type: 'model/obj' },
+    { artifact_id: 'artifact_003', filename: 'preview.png', content_type: 'image/png' },
+    { artifact_id: 'artifact_004', filename: 'summary.json', content_type: 'application/json' },
+    { artifact_id: 'artifact_005', filename: 'pace.json', content_type: 'application/json' },
+    { artifact_id: 'artifact_006', filename: 'generated_scene.py', content_type: 'text/x-python' },
   ];
 }
 

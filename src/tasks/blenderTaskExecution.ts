@@ -212,14 +212,14 @@ export async function handleBlenderExecute(
       updatedAt: utcNow(),
     });
 
-    const artifacts = await uploadArtifacts(taskId, payload.projectId, terminalStatus, context.attempts, workerName);
+    const artifactDetails = await uploadArtifacts(taskId, payload.projectId, terminalStatus, context.attempts, workerName);
     const result = {
       workflow: payload.workflow.id,
       model_id: terminalStatus.model_id || modelId,
       run_id: terminalStatus.run_id,
       runner_status: terminalStatus.status,
-      artifacts,
-      artifact_uris: buildArtifactUriMap(artifacts),
+      artifacts: buildArtifactUriMap(artifactDetails),
+      artifact_details: artifactDetails,
     };
 
     await taskStore.save({
@@ -243,7 +243,7 @@ export async function handleBlenderExecute(
       message: 'blender execution succeeded',
       detailJson: {
         runId: terminalStatus.run_id,
-        artifacts: artifacts.map((artifact) => ({
+        artifacts: artifactDetails.map((artifact) => ({
           artifact_id: artifact.artifact_id,
           asset_uri: artifact.asset_uri,
           kind: artifact.kind,
@@ -387,17 +387,22 @@ async function stageReferenceImage(projectId: string, assetUri: string | null) {
   try {
     const downloaded = await downloadAsset(projectId, assetUri);
     const tempDirectory = await mkdtemp(join(tmpdir(), 'comfyui-blender-reference-'));
-    const sourceImagePath = join(tempDirectory, buildSafeReferenceFilename(downloaded.filename, downloaded.contentType));
-    await writeFile(sourceImagePath, downloaded.buffer);
-    return {
-      cleanup: async () => rm(tempDirectory, { recursive: true, force: true }),
-      referenceImage: {
-        filename: downloaded.filename,
-        content_type: downloaded.contentType,
-        base64: downloaded.buffer.toString('base64'),
-      },
-      sourceImagePath,
-    };
+    try {
+      const sourceImagePath = join(tempDirectory, buildSafeReferenceFilename(downloaded.filename, downloaded.contentType));
+      await writeFile(sourceImagePath, downloaded.buffer);
+      return {
+        cleanup: async () => rm(tempDirectory, { recursive: true, force: true }),
+        referenceImage: {
+          filename: downloaded.filename,
+          content_type: downloaded.contentType,
+          base64: downloaded.buffer.toString('base64'),
+        },
+        sourceImagePath,
+      };
+    } catch (error) {
+      await rm(tempDirectory, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
   } catch (error: any) {
     const message = String(error?.message || error || '');
     if (error?.name === 'NoSuchKey' || message.includes('NoSuchKey') || message.includes('The specified key does not exist')) {
@@ -498,24 +503,24 @@ function normalizeRequiredArtifacts(
 
 function inferArtifactKind(artifact: Pick<BlenderApiArtifactMetadata, 'artifact_id' | 'filename'>): RequiredArtifactKind | null {
   const artifactId = normalizeArtifactToken(artifact.artifact_id);
-  const filename = normalizeArtifactToken(artifact.filename);
+  const filename = normalizeArtifactFilename(artifact.filename);
 
-  if (artifactId === 'scene_blend' || filename === 'scene_blend') {
+  if (artifactId === 'scene_blend' || filename === 'scene') {
     return 'blend';
   }
-  if (artifactId === 'model_obj' || filename === 'model_obj') {
+  if (artifactId === 'model_obj' || filename === 'model') {
     return 'model_obj';
   }
-  if (artifactId === 'preview_png' || filename === 'preview_png') {
+  if (artifactId === 'preview_png' || filename === 'preview') {
     return 'preview';
   }
-  if (artifactId === 'summary_json' || filename === 'summary_json') {
+  if (artifactId === 'summary_json' || filename === 'summary') {
     return 'summary';
   }
-  if (artifactId === 'pace_json' || filename === 'pace_json') {
+  if (artifactId === 'pace_json' || filename === 'pace') {
     return 'pace';
   }
-  if (artifactId === 'generated_scene_py' || filename === 'generated_scene_py') {
+  if (artifactId === 'generated_scene_py' || filename === 'generated_scene') {
     return 'generated_script';
   }
   return null;
@@ -533,6 +538,14 @@ function buildArtifactUriMap(artifacts: Array<Record<string, unknown>>): Record<
 function normalizeArtifactToken(value: unknown): string {
   return String(value || '')
     .trim()
+    .toLowerCase()
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function normalizeArtifactFilename(value: unknown): string {
+  return basename(String(value || '').trim() || '')
     .toLowerCase()
     .replace(/\.[a-z0-9]+$/i, '')
     .replace(/[^a-z0-9]+/g, '_')
