@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "compile": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "start": "npm run compile && node ./dist/index.js",
     "server": "npm run compile && node ./dist/index.js",
     "queue:worker": "npm run compile && node ./dist/queue/worker-cli.js"
@@ -28,6 +30,7 @@
     "@types/express": "^5.0.5",
     "@types/node": "^24.9.0",
     "@types/pg": "^8.15.5",
+    "vitest": "^4.1.8",
     "typescript": "^5.9.3"
   }
 }
