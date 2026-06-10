@@ -16,7 +16,8 @@ APP_DIR="${APP_DIR:-/opt/comfyui-worker}"
 REPO_URL="${REPO_URL:-$(git -C "${REPO_ROOT}" remote get-url origin)}"
 DEPLOY_REF="${DEPLOY_REF:-main}"
 LOCAL_ENV_FILE="${LOCAL_ENV_FILE:-${REPO_ROOT}/.env}"
-REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-${APP_DIR}/.env}"
+REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-/etc/comfyui-worker/.env}"
+REMOTE_ENV_DIR="$(dirname "${REMOTE_ENV_FILE}")"
 
 if [[ ! -f "${LOCAL_ENV_FILE}" ]]; then
   echo "Local env file not found: ${LOCAL_ENV_FILE}" >&2
@@ -46,14 +47,13 @@ ssh "${DEPLOY_TARGET}" \
     else
       git checkout --force \"${DEPLOY_REF}\"
     fi
-    chmod +x \"${APP_DIR}/deploy/droplet/install-host.sh\"
   '"
 
-ssh "${DEPLOY_TARGET}" "mkdir -p '${APP_DIR}'"
+ssh "${DEPLOY_TARGET}" "mkdir -p '${APP_DIR}' '${REMOTE_ENV_DIR}'"
 scp "${LOCAL_ENV_FILE}" "${DEPLOY_TARGET}:${REMOTE_ENV_FILE}"
 
 ssh "${DEPLOY_TARGET}" \
   "export APP_DIR='${APP_DIR}' REMOTE_ENV_FILE='${REMOTE_ENV_FILE}' PAI_WEBDAV_URL='${PAI_WEBDAV_URL}' PAI_WEBDAV_USERNAME='${PAI_WEBDAV_USERNAME}' PAI_WEBDAV_PASSWORD='${PAI_WEBDAV_PASSWORD}' PAI_WEBDAV_MOUNT_POINT='${PAI_WEBDAV_MOUNT_POINT:-/mnt/pai-projects}' HOST_HTTP_PORT='${HOST_HTTP_PORT:-8091}'; bash -lc '
     set -euo pipefail
-    \"${APP_DIR}/deploy/droplet/install-host.sh\"
+    bash \"${APP_DIR}/deploy/droplet/install-host.sh\"
   '"
