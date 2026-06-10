@@ -81,6 +81,30 @@ test('json fields accept json-compatible values including null', () => {
   });
 });
 
+test('object fields reject non-json-compatible descendants', () => {
+  const definition = normalizeTaskDefinitionJson({
+    consumer_key: 'blender_consumer',
+    payload: {
+      fields: {
+        pace: { type: 'object', required: true },
+      },
+    },
+  });
+
+  expect(() => normalizePayloadWithDefinition({ pace: { scene: { samples: Number.NaN } } }, definition)).toThrow(
+    'payload.pace.scene.samples must be JSON-compatible',
+  );
+  expect(() => normalizePayloadWithDefinition({ pace: { scene: { started_at: new Date() } } }, definition)).toThrow(
+    'payload.pace.scene.started_at must be JSON-compatible',
+  );
+  expect(() =>
+    normalizePayloadWithDefinition({ pace: { scene: { on_complete: () => 'done' } } }, definition),
+  ).toThrow('payload.pace.scene.on_complete must be JSON-compatible');
+  expect(() => normalizePayloadWithDefinition({ pace: { scene: { asset_id: undefined } } }, definition)).toThrow(
+    'payload.pace.scene.asset_id must be JSON-compatible',
+  );
+});
+
 test('object and json defaults are cloned for each normalized payload', () => {
   const definition = normalizeTaskDefinitionJson({
     consumer_key: 'blender_consumer',
@@ -113,6 +137,41 @@ test('object and json defaults are cloned for each normalized payload', () => {
   expect(secondAssets[0]!.id).toBe('a1');
   expect(first.pace).not.toBe(second.pace);
   expect(first.assets).not.toBe(second.assets);
+});
+
+test('object and json defaults reject non-json-compatible values', () => {
+  expect(() =>
+    normalizeTaskDefinitionJson({
+      consumer_key: 'blender_consumer',
+      payload: {
+        fields: {
+          pace: { type: 'object', default: { scene: { samples: Number.NaN } } },
+        },
+      },
+    }),
+  ).toThrow('definition_json.payload.fields.pace.default.scene.samples must be JSON-compatible');
+
+  expect(() =>
+    normalizeTaskDefinitionJson({
+      consumer_key: 'blender_consumer',
+      payload: {
+        fields: {
+          metadata: { type: 'json', default: [Infinity] },
+        },
+      },
+    }),
+  ).toThrow('definition_json.payload.fields.metadata.default[0] must be JSON-compatible');
+
+  expect(() =>
+    normalizeTaskDefinitionJson({
+      consumer_key: 'blender_consumer',
+      payload: {
+        fields: {
+          metadata: { type: 'json', default: { generated_at: new Date() } },
+        },
+      },
+    }),
+  ).toThrow('definition_json.payload.fields.metadata.default.generated_at must be JSON-compatible');
 });
 
 test('required fields and unknown field rejection still work with object and json rules', () => {
@@ -174,6 +233,42 @@ test('minimum and maximum are rejected for object and json fields', () => {
   ).toThrow('definition_json.payload.fields.metadata.maximum is only allowed for number or integer fields');
 });
 
+test('string and boolean fields keep backwards-compatible minimum and maximum behavior', () => {
+  const definition = normalizeTaskDefinitionJson({
+    consumer_key: 'blender_consumer',
+    payload: {
+      fields: {
+        workflow: { type: 'string', minimum: 10, maximum: 20 },
+        dry_run: { type: 'boolean', minimum: 1, maximum: 2 },
+      },
+    },
+  });
+
+  expect(definition.payload.fields.workflow).toMatchObject({
+    type: 'string',
+    minimum: 10,
+    maximum: 20,
+  });
+  expect(definition.payload.fields.dry_run).toMatchObject({
+    type: 'boolean',
+    minimum: 1,
+    maximum: 2,
+  });
+
+  expect(
+    normalizePayloadWithDefinition(
+      {
+        workflow: 'ok',
+        dry_run: false,
+      },
+      definition,
+    ),
+  ).toEqual({
+    workflow: 'ok',
+    dry_run: false,
+  });
+});
+
 test('number and integer behavior remains unchanged', () => {
   const definition = normalizeTaskDefinitionJson({
     consumer_key: 'blender_consumer',
@@ -200,4 +295,31 @@ test('number and integer behavior remains unchanged', () => {
 
   expect(() => normalizePayloadWithDefinition({ width: 0.1, samples: 2 }, definition)).toThrow('payload.width must be >= 0.5');
   expect(() => normalizePayloadWithDefinition({ width: 1, samples: 64 }, definition)).toThrow('payload.samples must be <= 32');
+});
+
+test('json fields reject non-json-compatible values', () => {
+  const definition = normalizeTaskDefinitionJson({
+    consumer_key: 'blender_consumer',
+    payload: {
+      fields: {
+        metadata: { type: 'json', required: true },
+      },
+    },
+  });
+
+  expect(() => normalizePayloadWithDefinition({ metadata: Number.NaN }, definition)).toThrow(
+    'payload.metadata must be JSON-compatible',
+  );
+  expect(() => normalizePayloadWithDefinition({ metadata: Infinity }, definition)).toThrow(
+    'payload.metadata must be JSON-compatible',
+  );
+  expect(() => normalizePayloadWithDefinition({ metadata: new Date() }, definition)).toThrow(
+    'payload.metadata must be JSON-compatible',
+  );
+  expect(() => normalizePayloadWithDefinition({ metadata: [() => 'x'] }, definition)).toThrow(
+    'payload.metadata[0] must be JSON-compatible',
+  );
+  expect(() => normalizePayloadWithDefinition({ metadata: { token: Symbol('x') } }, definition)).toThrow(
+    'payload.metadata.token must be JSON-compatible',
+  );
 });

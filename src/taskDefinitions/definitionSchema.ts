@@ -36,7 +36,7 @@ export function normalizePayloadWithDefinition(
   rawPayload: Record<string, unknown>,
   definitionJson: TaskDefinitionJson,
 ): Record<string, unknown> {
-  const source = structuredClone(rawPayload || {});
+  const source = rawPayload || {};
   if (source[TASK_DEFINITION_META_KEY] !== undefined) {
     throw new ValidationError(`payload contains reserved field: ${TASK_DEFINITION_META_KEY}`);
   }
@@ -127,29 +127,68 @@ function normalizeTaskDefinitionFieldRule(value: unknown, field: string): TaskDe
   const minimum = normalizeOptionalNumber(rule.minimum, `${field}.minimum`);
   const maximum = normalizeOptionalNumber(rule.maximum, `${field}.maximum`);
 
-  if (!isNumericFieldType(type)) {
+  if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
+    throw new ValidationError(`${field}.minimum must be <= ${field}.maximum`);
+  }
+
+  if (type === 'object') {
     if (minimum !== undefined) {
       throw new ValidationError(`${field}.minimum is only allowed for number or integer fields`);
     }
     if (maximum !== undefined) {
       throw new ValidationError(`${field}.maximum is only allowed for number or integer fields`);
     }
+
+    return {
+      type,
+      required,
+      default: rule.default === undefined ? undefined : normalizeJsonObject(rule.default, `${field}.default`),
+      description: description || undefined,
+    };
   }
 
-  const defaultValue = rule.default === undefined ? undefined : normalizeDefaultValue(rule.default, `${field}.default`, {
-    type,
-    minimum,
-    maximum,
-  });
+  if (type === 'json') {
+    if (minimum !== undefined) {
+      throw new ValidationError(`${field}.minimum is only allowed for number or integer fields`);
+    }
+    if (maximum !== undefined) {
+      throw new ValidationError(`${field}.maximum is only allowed for number or integer fields`);
+    }
 
-  if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
-    throw new ValidationError(`${field}.minimum must be <= ${field}.maximum`);
+    return {
+      type,
+      required,
+      default: rule.default === undefined ? undefined : normalizeJsonValue(rule.default, `${field}.default`),
+      description: description || undefined,
+    };
+  }
+
+  if (type === 'string') {
+    return {
+      type,
+      required,
+      default: rule.default === undefined ? undefined : String(rule.default ?? ''),
+      description: description || undefined,
+      minimum,
+      maximum,
+    };
+  }
+
+  if (type === 'boolean') {
+    return {
+      type,
+      required,
+      default: rule.default === undefined ? undefined : normalizeBooleanValue(rule.default, `${field}.default`),
+      description: description || undefined,
+      minimum,
+      maximum,
+    };
   }
 
   return {
     type,
     required,
-    default: defaultValue,
+    default: rule.default === undefined ? undefined : normalizeNumericValue(rule.default, `${field}.default`, type, minimum, maximum),
     description: description || undefined,
     minimum,
     maximum,
@@ -170,51 +209,18 @@ function normalizeValueByRule(value: unknown, field: string, rule: TaskDefinitio
   }
 
   if (rule.type === 'boolean') {
-    if (typeof value === 'boolean') {
-      return value;
-    }
-    const normalized = String(value || '').trim().toLowerCase();
-    if (normalized === 'true') {
-      return true;
-    }
-    if (normalized === 'false') {
-      return false;
-    }
-    throw new ValidationError(`${field} must be a boolean`);
+    return normalizeBooleanValue(value, field);
   }
 
   if (rule.type === 'object') {
-    return structuredClone(requirePlainObject(value, field)) as JsonObject;
+    return normalizeJsonObject(value, field);
   }
 
   if (rule.type === 'json') {
     return normalizeJsonValue(value, field);
   }
 
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    throw new ValidationError(`${field} must be a ${rule.type}`);
-  }
-
-  const normalized = rule.type === 'integer' ? Math.floor(numeric) : numeric;
-  if (rule.minimum !== undefined && normalized < rule.minimum) {
-    throw new ValidationError(`${field} must be >= ${rule.minimum}`);
-  }
-  if (rule.maximum !== undefined && normalized > rule.maximum) {
-    throw new ValidationError(`${field} must be <= ${rule.maximum}`);
-  }
-  return normalized;
-}
-
-function normalizeDefaultValue(value: unknown, field: string, rule: TaskDefinitionFieldRule): JsonValue {
-  if (rule.type === 'string') {
-    return String(value ?? '');
-  }
-  return normalizeValueByRule(value, field, rule);
-}
-
-function isNumericFieldType(type: TaskDefinitionFieldType): type is 'number' | 'integer' {
-  return type === 'number' || type === 'integer';
+  return normalizeNumericValue(value, field, rule.type, rule.minimum, rule.maximum);
 }
 
 function normalizeJsonValue(value: unknown, field: string): JsonValue {
@@ -234,18 +240,63 @@ function normalizeJsonValue(value: unknown, field: string): JsonValue {
   }
 
   if (Array.isArray(value)) {
-    return value.map((item, index) => normalizeJsonValue(item, `${field}[${index}]`));
-  }
-
-  if (isPlainObject(value)) {
-    const normalized: JsonObject = {};
-    for (const [key, child] of Object.entries(value)) {
-      normalized[key] = normalizeJsonValue(child, `${field}.${key}`);
+    const normalized: JsonValue[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      normalized.push(normalizeJsonValue(value[index], `${field}[${index}]`));
     }
     return normalized;
   }
 
+  if (isPlainObject(value)) {
+    return normalizeJsonObject(value, field);
+  }
+
   throw new ValidationError(`${field} must be JSON-compatible`);
+}
+
+function normalizeJsonObject(value: unknown, field: string): JsonObject {
+  const source = requirePlainObject(value, field);
+  const normalized: JsonObject = {};
+  for (const [key, child] of Object.entries(source)) {
+    normalized[key] = normalizeJsonValue(child, `${field}.${key}`);
+  }
+  return normalized;
+}
+
+function normalizeBooleanValue(value: unknown, field: string): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'true') {
+    return true;
+  }
+  if (normalized === 'false') {
+    return false;
+  }
+  throw new ValidationError(`${field} must be a boolean`);
+}
+
+function normalizeNumericValue(
+  value: unknown,
+  field: string,
+  type: 'number' | 'integer',
+  minimum?: number,
+  maximum?: number,
+): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw new ValidationError(`${field} must be a ${type}`);
+  }
+
+  const normalized = type === 'integer' ? Math.floor(numeric) : numeric;
+  if (minimum !== undefined && normalized < minimum) {
+    throw new ValidationError(`${field} must be >= ${minimum}`);
+  }
+  if (maximum !== undefined && normalized > maximum) {
+    throw new ValidationError(`${field} must be <= ${maximum}`);
+  }
+  return normalized;
 }
 
 function validateFieldPath(fieldPath: string): void {
