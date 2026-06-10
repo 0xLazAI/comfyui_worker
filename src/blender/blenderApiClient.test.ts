@@ -153,6 +153,58 @@ test('pollBlenderRunUntilTerminal stops when the run succeeds', async () => {
   setBlenderApiClientTestOverridesForTests(undefined);
 });
 
+test('pollBlenderRunUntilTerminal rejects an absolute external status_url before fetching', async () => {
+  process.env.BLENDER_API_BASE_URL = 'http://127.0.0.1:3030';
+
+  const fetchMock = vi.fn();
+  vi.stubGlobal('fetch', fetchMock);
+
+  const { pollBlenderRunUntilTerminal } = await import('./blenderApiClient.js');
+  const error = await captureError(() =>
+    pollBlenderRunUntilTerminal({
+      run_id: 'run_123',
+      status_url: 'https://evil.example/runs/run_123',
+    }),
+  );
+
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(error.constructor.name).toBe('ProviderRequestError');
+  expect(error).toMatchObject({
+    statusCode: 502,
+    code: 'provider_status_url_rejected',
+    detail: {
+      run_id: 'run_123',
+      status_url: 'https://evil.example/runs/run_123',
+    },
+  });
+});
+
+test('pollBlenderRunUntilTerminal rejects a protocol-relative external status_url before fetching', async () => {
+  process.env.BLENDER_API_BASE_URL = 'http://127.0.0.1:3030';
+
+  const fetchMock = vi.fn();
+  vi.stubGlobal('fetch', fetchMock);
+
+  const { pollBlenderRunUntilTerminal } = await import('./blenderApiClient.js');
+  const error = await captureError(() =>
+    pollBlenderRunUntilTerminal({
+      run_id: 'run_456',
+      status_url: '//169.254.169.254/latest/meta-data',
+    }),
+  );
+
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(error.constructor.name).toBe('ProviderRequestError');
+  expect(error).toMatchObject({
+    statusCode: 502,
+    code: 'provider_status_url_rejected',
+    detail: {
+      run_id: 'run_456',
+      status_url: '//169.254.169.254/latest/meta-data',
+    },
+  });
+});
+
 test('pollBlenderRunUntilTerminal maps 4xx status responses to TaskRejectedError', async () => {
   process.env.BLENDER_API_BASE_URL = 'http://127.0.0.1:3030';
 
@@ -241,6 +293,39 @@ test('pollBlenderRunUntilTerminal throws TaskRejectedError when the run is rejec
     code: 'provider_rejected',
   });
   expect(error.message).toBe('Prompt is not allowed');
+});
+
+test('pollBlenderRunUntilTerminal times out on non-terminal statuses without real waiting', async () => {
+  process.env.BLENDER_API_BASE_URL = 'http://127.0.0.1:3030';
+  process.env.BLENDER_API_POLL_INTERVAL_SECONDS = '3';
+  process.env.BLENDER_API_TIMEOUT_SECONDS = '5';
+
+  const fetchMock = vi.fn().mockResolvedValue(
+    jsonResponse({
+      run_id: 'run_timeout',
+      status: 'running',
+    }),
+  );
+  const sleep = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('fetch', fetchMock);
+
+  const { pollBlenderRunUntilTerminal, setBlenderApiClientTestOverridesForTests } = await import('./blenderApiClient.js');
+  setBlenderApiClientTestOverridesForTests({
+    now: sequenceNow([0, 5_000]),
+    sleep,
+  });
+
+  const error = await captureError(() => pollBlenderRunUntilTerminal('run_timeout'));
+
+  expect(error.constructor.name).toBe('ProviderRequestError');
+  expect(error).toMatchObject({
+    statusCode: 504,
+    code: 'provider_poll_timeout',
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(sleep).not.toHaveBeenCalled();
+
+  setBlenderApiClientTestOverridesForTests(undefined);
 });
 
 test('downloadBlenderRunArtifact downloads bytes and returns metadata', async () => {

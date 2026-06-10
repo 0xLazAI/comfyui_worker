@@ -195,7 +195,20 @@ function resolveStatusUrl(submittedOrRunId: string | Pick<BlenderApiRunSubmitted
 
   const statusUrl = String(submittedOrRunId.status_url || '').trim();
   if (statusUrl) {
-    return new URL(statusUrl, ensureBaseUrl());
+    const baseUrl = new URL(ensureBaseUrl());
+    const resolved = new URL(statusUrl, baseUrl);
+    if (resolved.origin !== baseUrl.origin) {
+      throw new ProviderRequestError(
+        'Blender API returned a status_url outside the configured origin',
+        502,
+        'provider_status_url_rejected',
+        {
+          run_id: submittedOrRunId.run_id,
+          status_url: statusUrl,
+        },
+      );
+    }
+    return resolved;
   }
   return buildUrl(`/runs/${encodeURIComponent(submittedOrRunId.run_id)}`);
 }
