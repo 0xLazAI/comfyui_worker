@@ -8,6 +8,8 @@
 - `GET /capabilities`
 - `POST /tasks`
 - `GET /tasks/{task_id}`
+- `GET /tasks`
+- `GET /tasks/{task_id}/events`
 - `schema.json`
 - `credentials.json`
 - `heartbeat.json`
@@ -213,6 +215,11 @@ const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
 这组接口需要：
 
 - `Authorization: Bearer <COMFYUI_WORKER_TOKEN>`
+
+观察台接口同样需要这个 bearer token：
+
+- `GET /tasks?task_type=blender&limit=50` 返回最近任务快照
+- `GET /tasks/:taskId/events` 返回单个任务的事件流
 
 创建一个新任务定义的例子：
 

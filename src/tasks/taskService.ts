@@ -19,8 +19,20 @@ import { TASK_RUNTIME_META_KEY } from '../taskDefinitions/types.js';
 import { taskStore } from './taskStore.js';
 import { supportsConsumerKey } from './taskExecution.js';
 import { getTaskQueueDriver } from './taskQueue.js';
-import type { PublicTaskResponse, SubmitTaskInput, WorkerTaskRecord } from './types.js';
-import { mapWorkerTaskStatusToPublicStatus, toPublicTaskResponse, utcNow } from './types.js';
+import type {
+  PublicTaskResponse,
+  SubmitTaskInput,
+  TaskEventResponse,
+  TaskObservationResponse,
+  WorkerTaskRecord,
+} from './types.js';
+import {
+  mapWorkerTaskStatusToPublicStatus,
+  toPublicTaskResponse,
+  toTaskEventResponse,
+  toTaskObservationResponse,
+  utcNow,
+} from './types.js';
 
 export async function submitTask(input: SubmitTaskInput): Promise<{
   accepted: boolean;
@@ -181,6 +193,26 @@ function ensureObjectField(target: Record<string, unknown>, key: string): Record
 export async function getTaskResponse(taskId: string): Promise<PublicTaskResponse | null> {
   const task = await taskStore.get(taskId);
   return task ? toPublicTaskResponse(task) : null;
+}
+
+export async function listTaskObservations(filters?: {
+  limit?: number;
+  taskType?: string;
+}): Promise<TaskObservationResponse[]> {
+  const tasks = await taskStore.list({
+    limit: filters?.limit,
+    taskType: filters?.taskType,
+  });
+  return tasks.map(toTaskObservationResponse);
+}
+
+export async function listTaskEvents(taskId: string): Promise<TaskEventResponse[] | null> {
+  const task = await taskStore.get(taskId);
+  if (!task) {
+    return null;
+  }
+  const events = await taskStore.listEvents(taskId);
+  return events.map(toTaskEventResponse);
 }
 
 async function publishTaskToQueue(

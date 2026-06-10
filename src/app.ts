@@ -10,7 +10,7 @@ import { CONTRACT_VERSION, WORKER_NODE_TYPE, WORKER_TOKEN, WORKER_VERSION } from
 import { normalizeTaskDefinitionJson } from './taskDefinitions/definitionSchema.js';
 import { taskTypeDefinitionStore } from './taskDefinitions/taskTypeDefinitionStore.js';
 import { supportsConsumerKey } from './tasks/taskExecution.js';
-import { getTaskResponse, submitTask } from './tasks/taskService.js';
+import { getTaskResponse, listTaskEvents, listTaskObservations, submitTask } from './tasks/taskService.js';
 
 function parseObjectBody(value: unknown, field: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -71,6 +71,17 @@ function optionalBoolean(value: unknown): boolean | undefined {
   throw new ValidationError('enabled must be a boolean');
 }
 
+function optionalInteger(value: unknown, fallback: number, minimum = 1, maximum = 500): number {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || normalized < minimum) {
+    throw new ValidationError(`value must be an integer >= ${minimum}`);
+  }
+  return Math.min(Math.floor(normalized), maximum);
+}
+
 function requestActor(req: express.Request): string {
   return optionalString(req.header('x-operator') || req.header('x-actor') || req.header('x-user')) || 'system';
 }
@@ -117,6 +128,15 @@ export function createApp(): express.Express {
     });
   });
 
+  app.get('/tasks', async (req, res) => {
+    requireBearer(req.header('authorization') || undefined);
+    const tasks = await listTaskObservations({
+      limit: optionalInteger(req.query.limit, 50),
+      taskType: optionalString(req.query.task_type),
+    });
+    res.json({ tasks });
+  });
+
   app.post('/tasks', upload.fields([
     { name: 'source_image', maxCount: 1 },
     { name: 'image', maxCount: 1 },
@@ -135,6 +155,15 @@ export function createApp(): express.Express {
       dedupeKey: optionalString(req.header('x-idempotency-key') || req.header('idempotency-key')),
     });
     res.json(response);
+  });
+
+  app.get('/tasks/:taskId/events', async (req, res) => {
+    requireBearer(req.header('authorization') || undefined);
+    const events = await listTaskEvents(String(req.params.taskId || '').trim());
+    if (!events) {
+      throw new NotFoundError('Task not found');
+    }
+    res.json({ events });
   });
 
   app.get('/tasks/:taskId', async (req, res) => {
