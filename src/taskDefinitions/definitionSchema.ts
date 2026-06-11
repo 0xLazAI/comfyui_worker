@@ -146,15 +146,23 @@ function normalizeTaskDefinitionFieldRule(value: unknown, field: string): TaskDe
 
 function normalizeFieldType(value: unknown, field: string): TaskDefinitionFieldType {
   const normalized = requireString(value, field);
-  if (!['string', 'number', 'integer', 'boolean'].includes(normalized)) {
-    throw new ValidationError(`${field} must be one of string, number, integer, boolean`);
+  if (!['string', 'number', 'integer', 'boolean', 'object'].includes(normalized)) {
+    throw new ValidationError(`${field} must be one of string, number, integer, boolean, object`);
   }
   return normalized as TaskDefinitionFieldType;
 }
 
-function normalizeValueByRule(value: unknown, field: string, rule: TaskDefinitionFieldRule): string | number | boolean {
+function normalizeValueByRule(
+  value: unknown,
+  field: string,
+  rule: TaskDefinitionFieldRule,
+): string | number | boolean | Record<string, unknown> {
   if (rule.type === 'string') {
     return requireString(value, field);
+  }
+
+  if (rule.type === 'object') {
+    return requireObject(value, field);
   }
 
   if (rule.type === 'boolean') {
@@ -186,9 +194,16 @@ function normalizeValueByRule(value: unknown, field: string, rule: TaskDefinitio
   return normalized;
 }
 
-function normalizeDefaultValue(value: unknown, field: string, rule: TaskDefinitionFieldRule): string | number | boolean {
+function normalizeDefaultValue(
+  value: unknown,
+  field: string,
+  rule: TaskDefinitionFieldRule,
+): string | number | boolean | Record<string, unknown> {
   if (rule.type === 'string') {
     return String(value ?? '');
+  }
+  if (rule.type === 'object') {
+    return requireObject(value, field);
   }
   return normalizeValueByRule(value, field, rule);
 }

@@ -7,6 +7,7 @@ import { errorHandler } from './infra/errorHandler.js';
 import { currentRequestId } from './infra/logger.js';
 import { UnauthorizedError, ValidationError, NotFoundError } from './infra/HttpError.js';
 import { CONTRACT_VERSION, WORKER_NODE_TYPE, WORKER_TOKEN, WORKER_VERSION } from './infra/constants.js';
+import { WorkerRegistryPublisher } from './registry/WorkerRegistryPublisher.js';
 import { normalizeTaskDefinitionJson } from './taskDefinitions/definitionSchema.js';
 import { taskTypeDefinitionStore } from './taskDefinitions/taskTypeDefinitionStore.js';
 import { supportsConsumerKey } from './tasks/taskExecution.js';
@@ -82,6 +83,8 @@ function requireBearer(authorization: string | undefined): void {
   }
 }
 
+const registryPublisher = new WorkerRegistryPublisher();
+
 export function createApp(): express.Express {
   const app = express();
   const upload = multer({
@@ -147,9 +150,11 @@ export function createApp(): express.Express {
 
   app.get('/task-definitions', async (req, res) => {
     requireBearer(req.header('authorization') || undefined);
+    const workerName = optionalString(req.query.worker_name);
     const taskType = optionalString(req.query.task_type);
     const enabled = optionalBoolean(req.query.enabled);
     const definitions = await taskTypeDefinitionStore.list({
+      workerName,
       taskType,
       enabled,
     });
@@ -173,6 +178,7 @@ export function createApp(): express.Express {
       throw new ValidationError(`unsupported consumer_key: ${definitionJson.consumer_key}`);
     }
     const definition = await taskTypeDefinitionStore.create({
+      workerName: requireString(body.worker_name, 'worker_name'),
       taskType: requireString(body.task_type, 'task_type'),
       version: requireInteger(body.version, 'version'),
       enabled: optionalBoolean(body.enabled) ?? false,
@@ -180,6 +186,7 @@ export function createApp(): express.Express {
       definitionJson,
       actor: requestActor(req),
     });
+    await registryPublisher.syncWorker(definition.workerName);
     res.status(201).json(definition);
   });
 
@@ -192,7 +199,12 @@ export function createApp(): express.Express {
     if (definitionJson && !supportsConsumerKey(definitionJson.consumer_key)) {
       throw new ValidationError(`unsupported consumer_key: ${definitionJson.consumer_key}`);
     }
+    const existing = await taskTypeDefinitionStore.getById(requireString(req.params.id, 'id'));
+    if (!existing) {
+      throw new NotFoundError('Task definition not found');
+    }
     const definition = await taskTypeDefinitionStore.update(requireString(req.params.id, 'id'), {
+      workerName: body.worker_name === undefined ? undefined : requireString(body.worker_name, 'worker_name'),
       taskType: body.task_type === undefined ? undefined : requireString(body.task_type, 'task_type'),
       version: body.version === undefined ? undefined : requireInteger(body.version, 'version'),
       enabled: optionalBoolean(body.enabled),
@@ -200,15 +212,24 @@ export function createApp(): express.Express {
       definitionJson,
       actor: requestActor(req),
     });
+    await registryPublisher.syncWorker(existing.workerName);
+    if (definition.workerName !== existing.workerName) {
+      await registryPublisher.syncWorker(definition.workerName);
+    }
     res.json(definition);
   });
 
   app.delete('/task-definitions/:id', async (req, res) => {
     requireBearer(req.header('authorization') || undefined);
+    const definition = await taskTypeDefinitionStore.getById(requireString(req.params.id, 'id'));
+    if (!definition) {
+      throw new NotFoundError('Task definition not found');
+    }
     const deleted = await taskTypeDefinitionStore.delete(requireString(req.params.id, 'id'));
     if (!deleted) {
       throw new NotFoundError('Task definition not found');
     }
+    await registryPublisher.syncWorker(definition.workerName);
     res.json({ deleted: true });
   });
 

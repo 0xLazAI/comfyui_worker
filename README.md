@@ -122,6 +122,7 @@ const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
 
 关键字段是：
 
+- `worker_name`
 - `task_type`
 - `version`
 - `enabled`
@@ -134,7 +135,7 @@ const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
 
 这里真正决定校验规则的是 `definition_json`。
 
-结构如下：
+`definition_json` 结构如下：
 
 ```json
 {
@@ -204,6 +205,19 @@ const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
 
 - `Authorization: Bearer <COMFYUI_WORKER_TOKEN>`
 
+其中：
+
+- `worker_name` 用来决定把这个任务注册到哪个 worker 目录
+- 它只影响注册文件写入，不参与任务消费逻辑
+
+创建、更新、删除任务定义成功后，服务会立刻按 `worker_name` 重写：
+
+- `/data/pai-projects/.pai-workers/<worker_name>/schema.json`
+- `/data/pai-projects/.pai-workers/<worker_name>/credentials.json`
+- `/data/pai-projects/.pai-workers/<worker_name>/description.md`
+
+这里不会做追加注册，而是按当前数据库里该 `worker_name` 下所有 `enabled=true` 的定义全量重建覆盖，所以不会重复注册。
+
 创建一个新任务定义的例子：
 
 ```bash
@@ -212,6 +226,7 @@ curl -X POST 'http://host/task-definitions' \
   -H 'Content-Type: application/json' \
   -H 'x-operator: maozhijian' \
   --data-raw '{
+    "worker_name": "storyboard-worker",
     "task_type": "upscale_panel",
     "version": 1,
     "enabled": true,
@@ -235,6 +250,7 @@ curl -X POST 'http://host/task-definitions' \
 - 同一个 `task_type + version` 不能重复
 - 同一个 `task_type` 同时只应该有一个 `enabled=true` 的版本
 - `consumer_key` 必须是代码里已经支持的 key
+- 同一个 `worker_name` 的注册文件始终按数据库重建覆盖，不会追加重复 task
 
 ### 4. 提交任务时会发生什么
 
@@ -269,16 +285,19 @@ curl -X POST 'http://host/task-definitions' \
 1. 先确定 `consumer_key`
 2. 写具体 handler
 3. 把 `consumer_key -> handler` 注册到 `CONSUMER_HANDLERS`
-4. 如果需要，补对应的 provider / asset / sidecar 逻辑
-5. 通过 `POST /task-definitions` 创建启用中的定义
-6. 调 `GET /capabilities` 确认新 `task_type` 已经暴露
-7. 用 `POST /tasks` 提一条最小任务
-8. 轮询 `GET /tasks/{task_id}` 验证最终状态
+4. 确定这个任务应该归属哪个 `worker_name`
+5. 如果需要，补对应的 provider / asset / sidecar 逻辑
+6. 通过 `POST /task-definitions` 创建启用中的定义
+7. 检查 `/data/pai-projects/.pai-workers/<worker_name>/schema.json` 是否已更新
+8. 调 `GET /capabilities` 确认新 `task_type` 已经暴露
+9. 用 `POST /tasks` 提一条最小任务
+10. 轮询 `GET /tasks/{task_id}` 验证最终状态
 
 ### 6. 对外新增 Task Type 时要注意什么
 
 这套架构里：
 
+- `worker_name` 决定注册到哪个 worker 文件目录
 - `task_type` 决定业务路由
 - `consumer_key` 决定代码执行逻辑
 - `definition_json` 决定 payload 规则

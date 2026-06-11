@@ -1,9 +1,9 @@
-export type TaskDefinitionFieldType = 'string' | 'number' | 'integer' | 'boolean';
+export type TaskDefinitionFieldType = 'string' | 'number' | 'integer' | 'boolean' | 'object';
 
 export interface TaskDefinitionFieldRule {
   type: TaskDefinitionFieldType;
   required?: boolean;
-  default?: string | number | boolean;
+  default?: string | number | boolean | Record<string, unknown>;
   description?: string;
   minimum?: number;
   maximum?: number;
@@ -21,6 +21,7 @@ export interface TaskDefinitionJson {
 
 export interface TaskTypeDefinitionRecord {
   id: string;
+  workerName: string;
   taskType: string;
   version: number;
   enabled: boolean;
@@ -33,6 +34,7 @@ export interface TaskTypeDefinitionRecord {
 }
 
 export interface TaskTypeDefinitionCreateInput {
+  workerName: string;
   taskType: string;
   version: number;
   enabled: boolean;
@@ -42,6 +44,7 @@ export interface TaskTypeDefinitionCreateInput {
 }
 
 export interface TaskTypeDefinitionUpdateInput {
+  workerName?: string;
   taskType?: string;
   version?: number;
   enabled?: boolean;

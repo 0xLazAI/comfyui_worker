@@ -1,5 +1,6 @@
 import { getDatabasePool, initializeDatabase } from '../infra/database.js';
 import { ConflictError, NotFoundError, ValidationError } from '../infra/HttpError.js';
+import { WORKER_NAME } from '../infra/constants.js';
 import { normalizeTaskDefinitionJson } from './definitionSchema.js';
 import type {
   TaskDefinitionJson,
@@ -15,10 +16,12 @@ const SYSTEM_ACTOR = 'system';
 export class TaskTypeDefinitionStore {
   async ensureReady(): Promise<void> {
     await initializeDatabase();
+    await this.ensureWorkerNames();
     await this.ensureBuiltInDefinitions();
   }
 
   async list(filters?: {
+    workerName?: string;
     taskType?: string;
     enabled?: boolean;
   }): Promise<TaskTypeDefinitionRecord[]> {
@@ -26,6 +29,10 @@ export class TaskTypeDefinitionStore {
     const conditions: string[] = [];
     const values: unknown[] = [];
 
+    if (filters?.workerName) {
+      values.push(filters.workerName);
+      conditions.push(`worker_name = $${values.length}`);
+    }
     if (filters?.taskType) {
       values.push(filters.taskType);
       conditions.push(`task_type = $${values.length}`);
@@ -37,10 +44,10 @@ export class TaskTypeDefinitionStore {
 
     const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const result = await pool.query(
-      `SELECT id, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by
+      `SELECT id, worker_name, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by
       FROM task_type_definitions
       ${whereClause}
-      ORDER BY task_type ASC, version DESC, id DESC`,
+      ORDER BY worker_name ASC, task_type ASC, version DESC, id DESC`,
       values,
     );
     return result.rows.map(mapRowToRecord);
@@ -49,7 +56,7 @@ export class TaskTypeDefinitionStore {
   async getById(id: string): Promise<TaskTypeDefinitionRecord | null> {
     const pool = await getDatabasePool();
     const result = await pool.query(
-      `SELECT id, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by
+      `SELECT id, worker_name, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by
       FROM task_type_definitions
       WHERE id = $1`,
       [id],
@@ -63,7 +70,7 @@ export class TaskTypeDefinitionStore {
   async getEnabledByTaskType(taskType: string): Promise<TaskTypeDefinitionRecord | null> {
     const pool = await getDatabasePool();
     const result = await pool.query(
-      `SELECT id, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by
+      `SELECT id, worker_name, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by
       FROM task_type_definitions
       WHERE task_type = $1 AND enabled = true
       ORDER BY version DESC, id DESC
@@ -74,6 +81,42 @@ export class TaskTypeDefinitionStore {
       return null;
     }
     return mapRowToRecord(result.rows[0]);
+  }
+
+  async getEnabledByWorkerAndTaskType(workerName: string, taskType: string): Promise<TaskTypeDefinitionRecord | null> {
+    const pool = await getDatabasePool();
+    const result = await pool.query(
+      `SELECT id, worker_name, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by
+      FROM task_type_definitions
+      WHERE worker_name = $1 AND task_type = $2 AND enabled = true
+      ORDER BY version DESC, id DESC
+      LIMIT 1`,
+      [normalizeWorkerName(workerName), taskType],
+    );
+    if (!result.rowCount) {
+      return null;
+    }
+    return mapRowToRecord(result.rows[0]);
+  }
+
+  async listEnabledByWorkerName(workerName: string): Promise<TaskTypeDefinitionRecord[]> {
+    return this.list({
+      workerName,
+      enabled: true,
+    });
+  }
+
+  async listEnabledWorkerNames(): Promise<string[]> {
+    const pool = await getDatabasePool();
+    const result = await pool.query(
+      `SELECT DISTINCT worker_name
+      FROM task_type_definitions
+      WHERE enabled = true
+      ORDER BY worker_name ASC`,
+    );
+    return result.rows
+      .map((row) => String(row.worker_name || '').trim())
+      .filter(Boolean);
   }
 
   async listEnabledTaskTypes(): Promise<string[]> {
@@ -91,6 +134,7 @@ export class TaskTypeDefinitionStore {
     const pool = await getDatabasePool();
     const client = await pool.connect();
     const actor = normalizeActor(input.actor);
+    const normalizedWorkerName = normalizeWorkerName(input.workerName);
     const normalizedTaskType = normalizeTaskType(input.taskType);
 
     try {
@@ -98,14 +142,15 @@ export class TaskTypeDefinitionStore {
       if (input.enabled) {
         await client.query(
           `UPDATE task_type_definitions
-          SET enabled = false, updated_at = NOW(), updated_by = $2
-          WHERE task_type = $1 AND enabled = true`,
-          [normalizedTaskType, actor],
+          SET enabled = false, updated_at = NOW(), updated_by = $3
+          WHERE worker_name = $1 AND task_type = $2 AND enabled = true`,
+          [normalizedWorkerName, normalizedTaskType, actor],
         );
       }
 
       const result = await client.query(
         `INSERT INTO task_type_definitions (
+          worker_name,
           task_type,
           version,
           enabled,
@@ -113,9 +158,10 @@ export class TaskTypeDefinitionStore {
           definition_json,
           created_by,
           updated_by
-        ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
-        RETURNING id, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by`,
+        ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+        RETURNING id, worker_name, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by`,
         [
+          normalizedWorkerName,
           normalizedTaskType,
           normalizeVersion(input.version),
           input.enabled,
@@ -131,7 +177,7 @@ export class TaskTypeDefinitionStore {
     } catch (error: any) {
       await client.query('ROLLBACK');
       if (error?.code === '23505') {
-        throw new ConflictError('task_type + version already exists');
+        throw new ConflictError('worker_name + task_type + version already exists');
       }
       throw error;
     } finally {
@@ -145,6 +191,7 @@ export class TaskTypeDefinitionStore {
       throw new NotFoundError('Task definition not found');
     }
 
+    const nextWorkerName = input.workerName === undefined ? existing.workerName : normalizeWorkerName(input.workerName);
     const nextTaskType = input.taskType === undefined ? existing.taskType : normalizeTaskType(input.taskType);
     const nextVersion = input.version === undefined ? existing.version : normalizeVersion(input.version);
     const nextEnabled = input.enabled === undefined ? existing.enabled : input.enabled;
@@ -159,25 +206,27 @@ export class TaskTypeDefinitionStore {
       if (nextEnabled) {
         await client.query(
           `UPDATE task_type_definitions
-          SET enabled = false, updated_at = NOW(), updated_by = $3
-          WHERE task_type = $1 AND enabled = true AND id <> $2`,
-          [nextTaskType, id, actor],
+          SET enabled = false, updated_at = NOW(), updated_by = $4
+          WHERE worker_name = $1 AND task_type = $2 AND enabled = true AND id <> $3`,
+          [nextWorkerName, nextTaskType, id, actor],
         );
       }
 
       const result = await client.query(
         `UPDATE task_type_definitions
-        SET task_type = $2,
-            version = $3,
-            enabled = $4,
-            description = $5,
-            definition_json = $6::jsonb,
+        SET worker_name = $2,
+            task_type = $3,
+            version = $4,
+            enabled = $5,
+            description = $6,
+            definition_json = $7::jsonb,
             updated_at = NOW(),
-            updated_by = $7
+            updated_by = $8
         WHERE id = $1
-        RETURNING id, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by`,
+        RETURNING id, worker_name, task_type, version, enabled, description, definition_json, created_at, updated_at, created_by, updated_by`,
         [
           id,
+          nextWorkerName,
           nextTaskType,
           nextVersion,
           nextEnabled,
@@ -192,7 +241,7 @@ export class TaskTypeDefinitionStore {
     } catch (error: any) {
       await client.query('ROLLBACK');
       if (error?.code === '23505') {
-        throw new ConflictError('task_type + version already exists');
+        throw new ConflictError('worker_name + task_type + version already exists');
       }
       throw error;
     } finally {
@@ -211,7 +260,7 @@ export class TaskTypeDefinitionStore {
   }
 
   private async ensureBuiltInDefinitions(): Promise<void> {
-    const existing = await this.getEnabledByTaskType(RENDER_PANEL_TASK_TYPE);
+    const existing = await this.getEnabledByWorkerAndTaskType(WORKER_NAME, RENDER_PANEL_TASK_TYPE);
     if (existing) {
       return;
     }
@@ -220,14 +269,15 @@ export class TaskTypeDefinitionStore {
     const count = await pool.query(
       `SELECT COUNT(*) AS count
       FROM task_type_definitions
-      WHERE task_type = $1`,
-      [RENDER_PANEL_TASK_TYPE],
+      WHERE worker_name = $1 AND task_type = $2`,
+      [WORKER_NAME, RENDER_PANEL_TASK_TYPE],
     );
     if (Number(count.rows[0]?.count || 0) > 0) {
       return;
     }
 
     await this.create({
+      workerName: WORKER_NAME,
       taskType: RENDER_PANEL_TASK_TYPE,
       version: 1,
       enabled: true,
@@ -240,6 +290,20 @@ export class TaskTypeDefinitionStore {
       }
     });
   }
+
+  private async ensureWorkerNames(): Promise<void> {
+    const pool = await getDatabasePool();
+    await pool.query(
+      `UPDATE task_type_definitions
+      SET worker_name = CASE
+        WHEN task_type = 'render_panel' THEN $1
+        WHEN task_type = 'blender' THEN 'blender_worker'
+        ELSE 'default-worker'
+      END
+      WHERE worker_name IS NULL OR BTRIM(worker_name) = ''`,
+      [WORKER_NAME],
+    );
+  }
 }
 
 export const taskTypeDefinitionStore = new TaskTypeDefinitionStore();
@@ -247,6 +311,7 @@ export const taskTypeDefinitionStore = new TaskTypeDefinitionStore();
 function mapRowToRecord(row: Record<string, unknown>): TaskTypeDefinitionRecord {
   return {
     id: String(row.id),
+    workerName: normalizeWorkerName(row.worker_name),
     taskType: String(row.task_type),
     version: Number(row.version),
     enabled: Boolean(row.enabled),
@@ -263,6 +328,14 @@ function normalizeTaskType(value: string): string {
   const normalized = String(value || '').trim();
   if (!normalized) {
     throw new ValidationError('task_type is required');
+  }
+  return normalized;
+}
+
+function normalizeWorkerName(value: unknown): string {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    throw new ValidationError('worker_name is required');
   }
   return normalized;
 }

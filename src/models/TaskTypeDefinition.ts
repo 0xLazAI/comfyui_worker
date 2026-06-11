@@ -1,12 +1,16 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
 @Entity({ name: 'task_type_definitions' })
-@Index('uq_task_type_definitions_type_version', ['taskType', 'version'], { unique: true })
+@Index('uq_task_type_definitions_worker_type_version', ['workerName', 'taskType', 'version'], { unique: true })
 @Index('idx_task_type_definitions_type_enabled', ['taskType', 'enabled'])
+@Index('idx_task_type_definitions_worker_enabled', ['workerName', 'enabled'])
 @Index('idx_task_type_definitions_updated_at', ['updatedAt'])
 export class TaskTypeDefinitionEntity {
   @PrimaryGeneratedColumn({ type: 'bigint' })
   id!: string;
+
+  @Column({ name: 'worker_name', type: 'text', default: 'default-worker' })
+  workerName!: string;
 
   @Column({ name: 'task_type', type: 'text' })
   taskType!: string;
