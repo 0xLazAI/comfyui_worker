@@ -28,10 +28,14 @@ export interface BlenderApiRunRequest {
   project_id: string;
   scene_id: string;
   shot_id: string;
-  model_id: string;
   pace: Record<string, unknown>;
   script: string;
   reference_image?: BlenderApiReferenceImage;
+}
+
+export interface BlenderApiRunLogEntry {
+  stream: 'stdout' | 'stderr' | 'system';
+  message: string;
 }
 
 export interface BlenderApiRunSubmitted {
@@ -152,6 +156,37 @@ export async function pollBlenderRunUntilTerminal(
 
     await getSleep()(BLENDER_API_POLL_INTERVAL_SECONDS * 1000);
   }
+}
+
+export async function fetchBlenderRunLogs(runId: string): Promise<BlenderApiRunLogEntry[]> {
+  const logsUrl = buildUrl(`/runs/${encodeURIComponent(runId)}/logs`);
+  const response = await getFetch()(logsUrl, {
+    method: 'GET',
+    headers: buildAuthHeaders(),
+  });
+  const data = await parseJsonResponse(response);
+
+  if (!response.ok) {
+    throw new ProviderRequestError(
+      extractMessage(data, `Blender API logs request failed with HTTP ${response.status}`),
+      response.status,
+      'provider_logs_failed',
+      data,
+    );
+  }
+
+  const logs = Array.isArray(data.logs) ? data.logs : [];
+  return logs
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry && typeof entry === 'object'))
+    .map((entry) => ({
+      stream: normalizeLogStream(entry.stream),
+      message: String(entry.message ?? ''),
+    }))
+    .filter((entry) => entry.message.trim().length > 0);
+}
+
+function normalizeLogStream(value: unknown): BlenderApiRunLogEntry['stream'] {
+  return value === 'stderr' || value === 'system' ? value : 'stdout';
 }
 
 export async function downloadBlenderRunArtifact(

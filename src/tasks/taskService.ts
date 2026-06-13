@@ -93,9 +93,11 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
     createdAt: now,
     updatedAt: now,
     currentAttempt: 0,
-    maxAttempts: TASK_MAX_ATTEMPTS,
-    backoffSeconds: [...TASK_BACKOFF_SECONDS],
-    timeoutSeconds: TASK_TIMEOUT_SECONDS,
+    maxAttempts: definition.definitionJson.execution?.max_attempts ?? TASK_MAX_ATTEMPTS,
+    backoffSeconds: definition.definitionJson.execution?.backoff_seconds
+      ? [...definition.definitionJson.execution.backoff_seconds]
+      : [...TASK_BACKOFF_SECONDS],
+    timeoutSeconds: definition.definitionJson.execution?.timeout_seconds ?? TASK_TIMEOUT_SECONDS,
     requestId: input.requestId ?? currentRequestId() ?? null,
     dedupeKey: input.dedupeKey ?? null,
     nextRunAt: null,

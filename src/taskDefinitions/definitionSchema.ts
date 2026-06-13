@@ -7,6 +7,7 @@ import {
   type TaskDefinitionBinding,
   type TaskDefinitionFieldType,
   type TaskDefinitionFieldRule,
+  type TaskDefinitionExecution,
   type TaskDefinitionJson,
 } from './types.js';
 
@@ -23,13 +24,62 @@ export function normalizeTaskDefinitionJson(input: Record<string, unknown>): Tas
     normalizedFields[fieldPath] = rule;
   }
 
+  const execution = normalizeTaskDefinitionExecution(input.execution);
+
   return {
     consumer_key: consumerKey,
+    ...(execution ? { execution } : {}),
     payload: {
       allow_unknown_fields: allowUnknownFields,
       fields: normalizedFields,
     },
   };
+}
+
+function normalizeTaskDefinitionExecution(value: unknown): TaskDefinitionExecution | undefined {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+
+  const execution = requireObject(value, 'definition_json.execution');
+  const timeoutSeconds = normalizePositiveInteger(execution.timeout_seconds, 'definition_json.execution.timeout_seconds');
+  const maxAttempts = normalizePositiveInteger(execution.max_attempts, 'definition_json.execution.max_attempts');
+  const backoffSeconds = normalizeBackoffSeconds(execution.backoff_seconds);
+
+  const normalized: TaskDefinitionExecution = {
+    ...(timeoutSeconds !== undefined ? { timeout_seconds: timeoutSeconds } : {}),
+    ...(maxAttempts !== undefined ? { max_attempts: maxAttempts } : {}),
+    ...(backoffSeconds ? { backoff_seconds: backoffSeconds } : {}),
+  };
+
+  return Object.keys(normalized).length ? normalized : undefined;
+}
+
+function normalizePositiveInteger(value: unknown, field: string): number | undefined {
+  const normalized = normalizeOptionalNumber(value, field);
+  if (normalized === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(normalized) || normalized < 1) {
+    throw new ValidationError(`${field} must be an integer >= 1`);
+  }
+  return normalized;
+}
+
+function normalizeBackoffSeconds(value: unknown): number[] | undefined {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new ValidationError('definition_json.execution.backoff_seconds must be an array of integers');
+  }
+  return value.map((entry, index) => {
+    const normalized = normalizePositiveInteger(entry, `definition_json.execution.backoff_seconds[${index}]`);
+    if (normalized === undefined) {
+      throw new ValidationError(`definition_json.execution.backoff_seconds[${index}] must be an integer >= 1`);
+    }
+    return normalized;
+  });
 }
 
 export function normalizePayloadWithDefinition(

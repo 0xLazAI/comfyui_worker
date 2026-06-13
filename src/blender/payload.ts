@@ -32,10 +32,11 @@ export function hydrateBlenderTaskPayload(
   const projectRoot = normalizeProjectRoot(context.projectRoot);
   const agent = normalizeAgent(payload.agent);
   const runnerTarget = normalizeRunnerTarget(payload.runner_target);
-  const sourceImageAssetUri = normalizeSourceImageAssetUri(payload, workflow.id);
+  const sourceImageAssetUri = normalizeSourceImageAssetUri(payload);
 
   if (workflow.id === 'blender-create-3d') {
     const pace = normalizeRequiredPace(payload.pace, workflow.id, sceneId, shotId);
+    const prompt = normalizeOptionalPrompt(payload.prompt);
     if (!sourceImageAssetUri) {
       throw new ValidationError('payload.inputs.image.assetUri is required');
     }
@@ -45,7 +46,7 @@ export function hydrateBlenderTaskPayload(
       sceneId,
       shotId,
       modelId: null,
-      prompt: null,
+      prompt,
       pace,
       agent,
       runnerTarget,
@@ -139,7 +140,7 @@ function normalizePace(value: unknown, workflowId: BlenderWorkflowId, sceneId: s
   const schemaVersion = schemaVersionValue === undefined ? fallback.schema_version : requireString(schemaVersionValue, 'payload.pace.schema_version');
   const style = normalizeOptionalSection(normalized.style, 'payload.pace.style');
 
-  return {
+  const merged: BlenderPace = {
     ...fallback,
     ...normalized,
     ...(camera ? { camera: { ...fallbackCamera, ...camera } } : {}),
@@ -154,9 +155,65 @@ function normalizePace(value: unknown, workflowId: BlenderWorkflowId, sceneId: s
     },
     ...(style ? { style: { ...fallbackStyle, ...style } } : {}),
   };
+
+  assertPaceStructure(merged);
+  return merged;
 }
 
-function normalizeSourceImageAssetUri(payload: Record<string, unknown>, workflowId: BlenderWorkflowId): string | null {
+function assertPaceStructure(pace: BlenderPace): void {
+  const camera = asJsonObjectOrNull(pace.camera);
+  if (camera) {
+    assertOptionalVector3(camera.position, 'payload.pace.camera.position');
+    assertOptionalVector3(camera.look_at, 'payload.pace.camera.look_at');
+    assertOptionalPositiveNumber(camera.focal_length_mm, 'payload.pace.camera.focal_length_mm');
+  }
+
+  const lighting = asJsonObjectOrNull(pace.lighting);
+  if (lighting) {
+    assertOptionalVector3(lighting.position, 'payload.pace.lighting.position');
+    assertOptionalPositiveNumber(lighting.energy, 'payload.pace.lighting.energy');
+    assertOptionalPositiveNumber(lighting.size, 'payload.pace.lighting.size');
+  }
+
+  const event = asJsonObjectOrNull(pace.event);
+  if (event && event.trigger_frame !== undefined && event.trigger_frame !== null) {
+    const triggerFrame = event.trigger_frame;
+    if (typeof triggerFrame !== 'number' || !Number.isInteger(triggerFrame) || triggerFrame < 1) {
+      throw new ValidationError('payload.pace.event.trigger_frame must be an integer >= 1');
+    }
+  }
+}
+
+function asJsonObjectOrNull(value: JsonValue | undefined): JsonObject | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value;
+}
+
+function assertOptionalVector3(value: JsonValue | undefined, field: string): void {
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length !== 3 ||
+    value.some((entry) => typeof entry !== 'number' || !Number.isFinite(entry))
+  ) {
+    throw new ValidationError(`${field} must be an array of 3 finite numbers`);
+  }
+}
+
+function assertOptionalPositiveNumber(value: JsonValue | undefined, field: string): void {
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new ValidationError(`${field} must be a positive number`);
+  }
+}
+
+function normalizeSourceImageAssetUri(payload: Record<string, unknown>): string | null {
   const inputs = payload.inputs;
   if (inputs !== undefined && inputs !== null && inputs !== '') {
     const normalizedInputs = requireObject(inputs, 'payload.inputs');
@@ -170,9 +227,6 @@ function normalizeSourceImageAssetUri(payload: Record<string, unknown>, workflow
   const legacyImageAssetUri = optionalString(payload.image);
   if (!legacyImageAssetUri) {
     return null;
-  }
-  if (workflowId === 'blender-create-3d') {
-    return requireAssetUri(legacyImageAssetUri, 'payload.image');
   }
   return requireAssetUri(legacyImageAssetUri, 'payload.image');
 }
@@ -197,6 +251,11 @@ function normalizeRunnerTarget(value: unknown): BlenderRunnerTarget {
     throw new ValidationError('payload.runner_target must be one of: local, gpu');
   }
   return normalized;
+}
+
+function normalizeOptionalPrompt(value: unknown): string | null {
+  const normalized = optionalString(value);
+  return normalized || null;
 }
 
 function requireAssetUri(value: unknown, field: string): string {

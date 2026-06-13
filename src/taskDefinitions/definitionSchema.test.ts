@@ -323,3 +323,45 @@ test('json fields reject non-json-compatible values', () => {
     'payload.metadata.token must be JSON-compatible',
   );
 });
+
+test('execution overrides parse timeout, attempts, and backoff', () => {
+  const definition = normalizeTaskDefinitionJson({
+    consumer_key: 'blender_consumer',
+    execution: {
+      timeout_seconds: 1800,
+      max_attempts: 2,
+      backoff_seconds: [15, 60],
+    },
+    payload: { fields: {} },
+  });
+
+  expect(definition.execution).toEqual({
+    timeout_seconds: 1800,
+    max_attempts: 2,
+    backoff_seconds: [15, 60],
+  });
+});
+
+test('execution is omitted when absent and rejects invalid values', () => {
+  const noExecution = normalizeTaskDefinitionJson({
+    consumer_key: 'blender_consumer',
+    payload: { fields: {} },
+  });
+  expect(noExecution.execution).toBeUndefined();
+
+  expect(() =>
+    normalizeTaskDefinitionJson({
+      consumer_key: 'blender_consumer',
+      execution: { timeout_seconds: 0 },
+      payload: { fields: {} },
+    }),
+  ).toThrow('definition_json.execution.timeout_seconds must be an integer >= 1');
+
+  expect(() =>
+    normalizeTaskDefinitionJson({
+      consumer_key: 'blender_consumer',
+      execution: { backoff_seconds: [10, -5] },
+      payload: { fields: {} },
+    }),
+  ).toThrow('definition_json.execution.backoff_seconds[1] must be an integer >= 1');
+});

@@ -373,6 +373,11 @@ function defaultRenderPanelDefinitionJson(): TaskDefinitionJson {
 function defaultBlenderDefinitionJson(): TaskDefinitionJson {
   return normalizeTaskDefinitionJson({
     consumer_key: 'blender_consumer',
+    execution: {
+      // Blender generation runs a vision-capable agent plus a render + review loop,
+      // which routinely takes several minutes; keep the job from timing out at the 300s default.
+      timeout_seconds: 1800,
+    },
     payload: {
       allow_unknown_fields: false,
       fields: {

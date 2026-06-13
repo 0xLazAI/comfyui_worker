@@ -16,9 +16,12 @@ const taskStoreMock = {
 const downloadAssetMock = vi.fn();
 const uploadWorkerAssetMock = vi.fn();
 const generateBlenderScriptMock = vi.fn();
+const repairBlenderScriptMock = vi.fn();
+const reviewBlenderPreviewMock = vi.fn();
 const submitBlenderRunMock = vi.fn();
 const pollBlenderRunUntilTerminalMock = vi.fn();
 const downloadBlenderRunArtifactMock = vi.fn();
+const fetchBlenderRunLogsMock = vi.fn();
 
 vi.mock('./taskStore.js', () => ({
   taskStore: taskStoreMock,
@@ -31,10 +34,13 @@ vi.mock('../render/assetStore.js', () => ({
 
 vi.mock('../blender/agent.js', () => ({
   generateBlenderScript: generateBlenderScriptMock,
+  repairBlenderScript: repairBlenderScriptMock,
+  reviewBlenderPreview: reviewBlenderPreviewMock,
 }));
 
 vi.mock('../blender/blenderApiClient.js', () => ({
   downloadBlenderRunArtifact: downloadBlenderRunArtifactMock,
+  fetchBlenderRunLogs: fetchBlenderRunLogsMock,
   pollBlenderRunUntilTerminal: pollBlenderRunUntilTerminalMock,
   submitBlenderRun: submitBlenderRunMock,
 }));
@@ -90,9 +96,15 @@ describe('blender task execution', () => {
     downloadAssetMock.mockReset();
     uploadWorkerAssetMock.mockReset();
     generateBlenderScriptMock.mockReset();
+    repairBlenderScriptMock.mockReset();
+    reviewBlenderPreviewMock.mockReset();
     submitBlenderRunMock.mockReset();
     pollBlenderRunUntilTerminalMock.mockReset();
     downloadBlenderRunArtifactMock.mockReset();
+    fetchBlenderRunLogsMock.mockReset();
+    fetchBlenderRunLogsMock.mockResolvedValue([]);
+    reviewBlenderPreviewMock.mockResolvedValue(null);
+    process.env.BLENDER_PREVIEW_REVIEW_ROUNDS = '0';
     taskStoreMock.get.mockClear();
     taskStoreMock.save.mockClear();
     taskStoreMock.appendEvent.mockClear();
@@ -105,6 +117,9 @@ describe('blender task execution', () => {
         rmSync(dirname(filePath), { recursive: true, force: true });
       }
     }
+    delete process.env.BLENDER_PREVIEW_REVIEW_ROUNDS;
+    delete process.env.BLENDER_PREVIEW_REVIEW_TIMEOUT_MS;
+    delete process.env.BLENDER_SCRIPT_REPAIR_ATTEMPTS;
     vi.clearAllMocks();
   });
 
@@ -128,8 +143,17 @@ describe('blender task execution', () => {
       expect(existsSync(stagedPath)).toBe(true);
       expect(readFileSync(stagedPath)).toEqual(sourceBuffer);
       return {
+        agentInstructionsPath: '/repo/agent.md',
         notes: ['created scene'],
         provider: 'codex',
+        referenceAnalysis: {
+          blockingNotes: ['Keep slate labels outside hero silhouettes.'],
+          cameraBrief: 'Low front camera centered on the puck.',
+          environment: ['indoor rink', 'boards'],
+          generationPrompt: 'Indoor hockey faceoff previs with referee and two players.',
+          primarySubjects: ['referee', 'blue player', 'red player', 'puck'],
+          sceneBrief: 'Indoor hockey faceoff with central referee.',
+        },
         script: 'import bpy\nbpy.data.objects\n',
         summary: 'Generated a previs scene.',
         threadId: 'thread_123',
@@ -177,6 +201,15 @@ describe('blender task execution', () => {
       message: 'generating blender script',
     }));
     expect(appendedEvents.some((event) => event.eventType === 'started')).toBe(true);
+    expect(appendedEvents.find((event) => event.eventType === 'agent_generated')).toMatchObject({
+      detailJson: {
+        agentInstructionsPath: '/repo/agent.md',
+        referenceAnalysis: {
+          cameraBrief: 'Low front camera centered on the puck.',
+          sceneBrief: 'Indoor hockey faceoff with central referee.',
+        },
+      },
+    });
     expect(downloadAssetMock).toHaveBeenCalledWith('project_456', 'assets://uploads/source.png');
     expect(submitBlenderRunMock).toHaveBeenCalledWith(expect.objectContaining({
       task_id: 'task_123',
@@ -184,7 +217,6 @@ describe('blender task execution', () => {
       project_id: 'project_456',
       scene_id: 'scene_001',
       shot_id: 'shot_010',
-      model_id: 'model_task_123',
       script: 'import bpy\nbpy.data.objects\n',
       reference_image: expect.objectContaining({
         base64: sourceBuffer.toString('base64'),
@@ -291,11 +323,14 @@ describe('blender task execution', () => {
     await handleBlenderExecute(envelope, context);
 
     expect(submitBlenderRunMock).toHaveBeenCalledWith(expect.objectContaining({
-      model_id: 'model_existing',
       reference_image: expect.objectContaining({
         content_type: 'image/jpeg',
         filename: 'update-source.jpg',
       }),
+    }));
+    expect(submitBlenderRunMock.mock.calls[0][0]).not.toHaveProperty('model_id');
+    expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
+      model_id: 'model_existing',
     }));
   });
 
@@ -437,6 +472,190 @@ describe('blender task execution', () => {
     expect(currentRecord.status).toBe('cancelled');
     expect(appendedEvents.at(-1)).toEqual(expect.objectContaining({ eventType: 'cancelled' }));
     expect(generateBlenderScriptMock).not.toHaveBeenCalled();
+  });
+
+  test('repairs the script with runner feedback and resubmits when the blender run fails', async () => {
+    const envelope = createEnvelope(currentRecord.taskId);
+    const context = createContext({ attempts: 1, maxAttempts: 3 });
+
+    arrangeScriptGenerationWithSourceImage();
+    submitBlenderRunMock
+      .mockResolvedValueOnce({ run_id: 'run_fail_1', status: 'queued', status_url: '/runs/run_fail_1' })
+      .mockResolvedValueOnce({ run_id: 'run_ok_2', status: 'queued', status_url: '/runs/run_ok_2' });
+    pollBlenderRunUntilTerminalMock
+      .mockRejectedValueOnce(
+        new ProviderRequestError('Blender API run failed', 502, 'provider_run_failed', { run_id: 'run_fail_1' }),
+      )
+      .mockResolvedValueOnce({
+        run_id: 'run_ok_2',
+        status: 'succeeded',
+        artifacts: createProviderArtifacts(),
+      });
+    fetchBlenderRunLogsMock.mockResolvedValue([
+      { stream: 'stderr', message: "NameError: name 'boom' is not defined" },
+    ]);
+    repairBlenderScriptMock.mockResolvedValue({
+      notes: ['repaired'],
+      provider: 'codex',
+      script: 'import bpy\nfixed_scene()\n',
+      summary: 'Repaired the previs scene.',
+      threadId: 'thread_123',
+    });
+    for (const artifact of createProviderArtifacts()) {
+      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
+        contentType: String(artifact.content_type),
+        filename: String(artifact.filename),
+      });
+      uploadWorkerAssetMock.mockResolvedValueOnce({
+        assetUri: `assets://blender/${artifact.filename}`,
+        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
+        contentType: artifact.content_type,
+        filename: artifact.filename,
+      });
+    }
+
+    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
+    await handleBlenderExecute(envelope, context);
+
+    expect(repairBlenderScriptMock).toHaveBeenCalledTimes(1);
+    const [, , , failure] = repairBlenderScriptMock.mock.calls[0];
+    expect(failure).toMatchObject({
+      errorMessage: 'Blender API run failed',
+      runId: 'run_fail_1',
+    });
+    expect(failure.logsTail).toEqual(["stderr: NameError: name 'boom' is not defined"]);
+    expect(submitBlenderRunMock).toHaveBeenCalledTimes(2);
+    expect(submitBlenderRunMock.mock.calls[1][0]).toMatchObject({
+      script: 'import bpy\nfixed_scene()\n',
+    });
+    expect(appendedEvents.some((event) => event.eventType === 'script_repair_started')).toBe(true);
+    expect(appendedEvents.some((event) => event.eventType === 'script_repaired')).toBe(true);
+    expect(currentRecord.status).toBe('succeeded');
+    expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
+      run_id: 'run_ok_2',
+      script_repair_attempts: 1,
+    }));
+  });
+
+  test('re-renders a corrected script when the preview review is not approved', async () => {
+    process.env.BLENDER_PREVIEW_REVIEW_ROUNDS = '1';
+    const envelope = createEnvelope(currentRecord.taskId);
+    const context = createContext({ attempts: 1, maxAttempts: 3 });
+
+    arrangeScriptGenerationWithSourceImage();
+    submitBlenderRunMock
+      .mockResolvedValueOnce({ run_id: 'run_first', status: 'queued', status_url: '/runs/run_first' })
+      .mockResolvedValueOnce({ run_id: 'run_fixed', status: 'queued', status_url: '/runs/run_fixed' });
+    pollBlenderRunUntilTerminalMock
+      .mockResolvedValueOnce({
+        run_id: 'run_first',
+        status: 'succeeded',
+        artifacts: createProviderArtifacts(),
+      })
+      .mockResolvedValueOnce({
+        run_id: 'run_fixed',
+        status: 'succeeded',
+        artifacts: createProviderArtifacts(),
+      });
+    reviewBlenderPreviewMock.mockResolvedValue({
+      approved: false,
+      issues: ['Preview is too dark to inspect.'],
+      script: 'import bpy\nbrighter_scene()\n',
+    });
+    downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+      buffer: Buffer.from('preview-binary'),
+      contentType: 'image/png',
+      filename: 'preview.png',
+    });
+    for (const artifact of createProviderArtifacts()) {
+      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
+        contentType: String(artifact.content_type),
+        filename: String(artifact.filename),
+      });
+      uploadWorkerAssetMock.mockResolvedValueOnce({
+        assetUri: `assets://blender/${artifact.filename}`,
+        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
+        contentType: artifact.content_type,
+        filename: artifact.filename,
+      });
+    }
+
+    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
+    await handleBlenderExecute(envelope, context);
+
+    expect(reviewBlenderPreviewMock).toHaveBeenCalledTimes(1);
+    expect(submitBlenderRunMock).toHaveBeenCalledTimes(2);
+    expect(submitBlenderRunMock.mock.calls[1][0]).toMatchObject({
+      script: 'import bpy\nbrighter_scene()\n',
+    });
+    expect(appendedEvents.some((event) => event.eventType === 'preview_reviewed')).toBe(true);
+    expect(appendedEvents.some((event) => event.eventType === 'preview_fix_applied')).toBe(true);
+    expect(currentRecord.status).toBe('succeeded');
+    expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
+      run_id: 'run_fixed',
+      preview_reviews: [
+        { round: 1, approved: false, issues: ['Preview is too dark to inspect.'] },
+      ],
+    }));
+  });
+
+  test('passes a bounded preview review timeout and keeps successful runner output when review times out', async () => {
+    process.env.BLENDER_PREVIEW_REVIEW_ROUNDS = '1';
+    process.env.BLENDER_PREVIEW_REVIEW_TIMEOUT_MS = '1234';
+    const envelope = createEnvelope(currentRecord.taskId);
+    const context = createContext({ attempts: 1, maxAttempts: 3 });
+
+    arrangeScriptGenerationWithSourceImage();
+    submitBlenderRunMock.mockResolvedValue({
+      run_id: 'run_first',
+      status: 'queued',
+      status_url: '/runs/run_first',
+    });
+    pollBlenderRunUntilTerminalMock.mockResolvedValue({
+      run_id: 'run_first',
+      status: 'succeeded',
+      artifacts: createProviderArtifacts(),
+    });
+    reviewBlenderPreviewMock.mockRejectedValue(
+      new Error('Codex turn timed out after 1234ms and was aborted to release the codex process.'),
+    );
+    downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+      buffer: Buffer.from('preview-binary'),
+      contentType: 'image/png',
+      filename: 'preview.png',
+    });
+    for (const artifact of createProviderArtifacts()) {
+      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
+        contentType: String(artifact.content_type),
+        filename: String(artifact.filename),
+      });
+      uploadWorkerAssetMock.mockResolvedValueOnce({
+        assetUri: `assets://blender/${artifact.filename}`,
+        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
+        contentType: artifact.content_type,
+        filename: artifact.filename,
+      });
+    }
+
+    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
+    await handleBlenderExecute(envelope, context);
+
+    expect(reviewBlenderPreviewMock).toHaveBeenCalledTimes(1);
+    expect(reviewBlenderPreviewMock.mock.calls[0][4]).toEqual({ turnTimeoutMs: 1234 });
+    expect(appendedEvents.find((event) => event.eventType === 'preview_review_skipped')).toMatchObject({
+      detailJson: {
+        error: expect.stringContaining('timed out after 1234ms'),
+        round: 1,
+      },
+    });
+    expect(currentRecord.status).toBe('succeeded');
+    expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
+      run_id: 'run_first',
+      preview_reviews: [],
+    }));
   });
 
   test('rejects missing source images with source_asset_missing', async () => {

@@ -60,6 +60,29 @@ test('hydrateBlenderTaskPayload normalizes create payload with defaults and sour
   });
 });
 
+test('hydrateBlenderTaskPayload preserves optional create prompts for agent direction', () => {
+  const normalized = hydrateBlenderTaskPayload(
+    {
+      workflow: 'blender-create-3d',
+      scene_id: 'scene_001',
+      shot_id: 'shot_010',
+      prompt: 'Match the low front camera and keep labels off the players.',
+      pace: {
+        schema_version: 'pace-1',
+        scene: {},
+      },
+      inputs: {
+        image: {
+          assetUri: 'assets://source-images/source.png',
+        },
+      },
+    },
+    CONTEXT,
+  );
+
+  expect(normalized.prompt).toBe('Match the low front camera and keep labels off the players.');
+});
+
 test('hydrateBlenderTaskPayload requires create payload fields', () => {
   expect(() =>
     hydrateBlenderTaskPayload(
@@ -485,4 +508,88 @@ test('hydrateBlenderTaskPayload rejects unsupported workflows', () => {
       CONTEXT,
     ),
   ).toThrow('payload.workflow is unsupported');
+});
+
+test('hydrateBlenderTaskPayload rejects malformed PACE camera vectors', () => {
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          camera: { position: [1, 2] },
+        },
+        inputs: { image: { assetUri: 'assets://source-images/source.png' } },
+      },
+      CONTEXT,
+    ),
+  ).toThrow(ValidationError);
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          camera: { look_at: ['a', 'b', 'c'] },
+        },
+        inputs: { image: { assetUri: 'assets://source-images/source.png' } },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace.camera.look_at must be an array of 3 finite numbers');
+});
+
+test('hydrateBlenderTaskPayload rejects malformed PACE lighting and event fields', () => {
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          lighting: { energy: -10 },
+        },
+        inputs: { image: { assetUri: 'assets://source-images/source.png' } },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace.lighting.energy must be a positive number');
+
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-create-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        pace: {
+          event: { trigger_frame: 0 },
+        },
+        inputs: { image: { assetUri: 'assets://source-images/source.png' } },
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.pace.event.trigger_frame must be an integer >= 1');
+});
+
+test('hydrateBlenderTaskPayload keeps custom PACE extension fields after validation', () => {
+  const normalized = hydrateBlenderTaskPayload(
+    {
+      workflow: 'blender-create-3d',
+      scene_id: 'scene_001',
+      shot_id: 'shot_010',
+      pace: {
+        camera: { position: [0, -7.5, 1.1], look_at: [0, 0, 0.7], focal_length_mm: 40 },
+        lighting: { energy: 1200, size: 6 },
+        subjects: [{ id: 'hero', position: [0, 0, 0] }],
+      },
+      inputs: { image: { assetUri: 'assets://source-images/source.png' } },
+    },
+    CONTEXT,
+  );
+
+  expect(normalized.pace.camera).toMatchObject({ focal_length_mm: 40 });
+  expect(normalized.pace.subjects).toEqual([{ id: 'hero', position: [0, 0, 0] }]);
 });

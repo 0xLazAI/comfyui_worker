@@ -2,34 +2,58 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import os from 'os';
-import { generateBlenderScript } from '../blender/agent.js';
+import {
+  generateBlenderScript,
+  repairBlenderScript,
+  reviewBlenderPreview,
+  type BlenderScriptFailure,
+  type GeneratedBlenderScript,
+  type GenerateBlenderScriptContext,
+} from '../blender/agent.js';
 import {
   downloadBlenderRunArtifact,
+  fetchBlenderRunLogs,
   pollBlenderRunUntilTerminal,
   submitBlenderRun,
   type BlenderApiArtifactMetadata,
   type BlenderApiRunStatus,
+  type BlenderApiRunSubmitted,
 } from '../blender/blenderApiClient.js';
 import { WORKER_NAME } from '../infra/constants.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
-import { downloadAsset, uploadWorkerAsset } from '../render/assetStore.js';
+import { downloadAsset } from '../render/assetStore.js';
 import { ProviderRequestError, TaskRejectedError } from '../render/errors.js';
 import { hydrateBlenderTaskPayload } from '../blender/payload.js';
+import type { HydratedBlenderTaskPayload } from '../blender/types.js';
+import { buildArtifactUriMap, findPreviewArtifact, uploadArtifacts } from './blenderArtifacts.js';
 import { taskStore } from './taskStore.js';
 import { isTerminalWorkerTaskStatus, utcNow } from './types.js';
 
 export const BLENDER_CONSUMER_KEY = 'blender_consumer';
 
-const REQUIRED_ARTIFACT_KINDS = [
-  'blend',
-  'model_obj',
-  'preview',
-  'summary',
-  'pace',
-  'generated_script',
-] as const;
+const DEFAULT_SCRIPT_REPAIR_ATTEMPTS = 2;
+const DEFAULT_PREVIEW_REVIEW_ROUNDS = 1;
+const DEFAULT_PREVIEW_REVIEW_TIMEOUT_MS = 2 * 60 * 1000;
+const RUN_LOG_TAIL_LIMIT = 40;
 
-type RequiredArtifactKind = (typeof REQUIRED_ARTIFACT_KINDS)[number];
+interface BlenderRunSession {
+  attemptNo: number;
+  modelId: string;
+  payload: HydratedBlenderTaskPayload;
+  referenceImage?: { filename: string; content_type: string; base64: string };
+  taskId: string;
+  workerName: string;
+}
+
+interface BlenderRunOutcome {
+  repairAttempts: number;
+  script: GeneratedBlenderScript;
+  terminalStatus: BlenderApiRunStatus;
+}
+
+interface ReviewedRunOutcome extends BlenderRunOutcome {
+  reviewVerdicts: Array<Record<string, unknown>>;
+}
 
 export async function handleBlenderExecute(
   envelope: QueueJobEnvelope<{ taskId: string }>,
@@ -101,165 +125,92 @@ export async function handleBlenderExecute(
   try {
     const stagedReferenceImage = await stageReferenceImage(payload.projectId, payload.inputs.sourceImageAssetUri);
     try {
-      const generatedScript = await generateBlenderScript(payload, {
+      const agentContext: GenerateBlenderScriptContext = {
         workingDirectory: payload.projectRoot,
         sourceImagePath: stagedReferenceImage?.sourceImagePath || null,
+      };
+      const generatedScript = await generateBlenderScript(payload, agentContext);
+      const session: BlenderRunSession = {
+        attemptNo: context.attempts,
+        modelId: resolveModelId(payload.taskId, payload.modelId),
+        payload,
+        referenceImage: stagedReferenceImage?.referenceImage,
+        taskId,
+        workerName,
+      };
+
+      await saveRunningState(session, 20, 'submitting blender run');
+      await taskStore.appendEvent({
+        taskId,
+        eventType: 'agent_generated',
+        attemptNo: context.attempts,
+        workerName,
+        message: 'blender script generated',
+        detailJson: {
+          agentInstructionsPath: generatedScript.agentInstructionsPath || null,
+          provider: generatedScript.provider,
+          referenceAnalysis: generatedScript.referenceAnalysis || null,
+          summary: generatedScript.summary,
+          threadId: generatedScript.threadId || null,
+        },
       });
-    await taskStore.save({
-      ...(await expectTask(taskId)),
-      status: 'running',
-      progress: 20,
-      eta: null,
-      message: 'submitting blender run',
-      errorCode: null,
-      currentAttempt: context.attempts,
-      workerName,
-      updatedAt: utcNow(),
-    });
-    await taskStore.appendEvent({
-      taskId,
-      eventType: 'agent_generated',
-      attemptNo: context.attempts,
-      workerName,
-      message: 'blender script generated',
-      detailJson: {
-        provider: generatedScript.provider,
-        summary: generatedScript.summary,
-        threadId: generatedScript.threadId || null,
-      },
-    });
 
-    const modelId = resolveModelId(payload.taskId, payload.modelId);
-    const submitted = await submitBlenderRun({
-      task_id: payload.taskId,
-      workflow: payload.workflow.id,
-      project_id: payload.projectId,
-      scene_id: payload.sceneId,
-      shot_id: payload.shotId,
-      model_id: modelId,
-      pace: payload.pace,
-      script: generatedScript.script,
-      ...(stagedReferenceImage?.referenceImage ? { reference_image: stagedReferenceImage.referenceImage } : {}),
-    });
-    await taskStore.save({
-      ...(await expectTask(taskId)),
-      status: 'running',
-      progress: 35,
-      eta: null,
-      message: 'provider submitted',
-      errorCode: null,
-      currentAttempt: context.attempts,
-      workerName,
-      updatedAt: utcNow(),
-    });
-    await taskStore.appendEvent({
-      taskId,
-      eventType: 'provider_submitted',
-      attemptNo: context.attempts,
-      workerName,
-      message: 'blender run submitted',
-      detailJson: {
-        runId: submitted.run_id,
-        status: submitted.status,
-        statusUrl: submitted.status_url || null,
+      const runOutcome = await executeRunWithRepair(session, generatedScript, agentContext);
+      const reviewed = await reviewPreviewAndMaybeRerun(session, runOutcome, agentContext);
+      const terminalStatus = reviewed.terminalStatus;
+
+      await saveRunningState(session, 75, 'uploading blender artifacts');
+
+      const artifactDetails = await uploadArtifacts(taskId, payload.projectId, terminalStatus, context.attempts, workerName);
+      const result = {
         workflow: payload.workflow.id,
-        modelId,
-      },
-    });
-
-    let lastProviderStatus = String(submitted.status || '').trim();
-    const terminalStatus = await pollBlenderRunUntilTerminal(submitted, async (status) => {
-      const normalizedStatus = String(status.status || '').trim();
-      if (!normalizedStatus || normalizedStatus === lastProviderStatus) {
-        return;
-      }
-      lastProviderStatus = normalizedStatus;
+        model_id: session.modelId,
+        run_id: terminalStatus.run_id,
+        runner_status: terminalStatus.status,
+        script_repair_attempts: reviewed.repairAttempts,
+        preview_reviews: reviewed.reviewVerdicts,
+        artifacts: buildArtifactUriMap(artifactDetails),
+        artifact_details: artifactDetails,
+      };
 
       await taskStore.save({
         ...(await expectTask(taskId)),
-        status: 'running',
-        progress: progressForProviderStatus(normalizedStatus),
-        eta: null,
-        message: `provider ${normalizedStatus}`,
+        status: 'succeeded',
+        progress: 100,
+        eta: 0,
+        message: 'done',
         errorCode: null,
+        resultPayload: result,
         currentAttempt: context.attempts,
+        finishedAt: utcNow(),
         workerName,
         updatedAt: utcNow(),
       });
       await taskStore.appendEvent({
         taskId,
-        eventType: 'provider_polled',
+        eventType: 'succeeded',
         attemptNo: context.attempts,
         workerName,
-        message: `blender run status changed to ${normalizedStatus}`,
+        message: 'blender execution succeeded',
         detailJson: {
-          runId: status.run_id,
-          status: normalizedStatus,
-          modelId: status.model_id || modelId,
+          runId: terminalStatus.run_id,
+          artifacts: artifactDetails.map((artifact) => ({
+            artifact_id: artifact.artifact_id,
+            asset_uri: artifact.asset_uri,
+            kind: artifact.kind,
+          })),
         },
       });
-    });
-
-    await taskStore.save({
-      ...(await expectTask(taskId)),
-      status: 'running',
-      progress: 75,
-      eta: null,
-      message: 'uploading blender artifacts',
-      errorCode: null,
-      currentAttempt: context.attempts,
-      workerName,
-      updatedAt: utcNow(),
-    });
-
-    const artifactDetails = await uploadArtifacts(taskId, payload.projectId, terminalStatus, context.attempts, workerName);
-    const result = {
-      workflow: payload.workflow.id,
-      model_id: terminalStatus.model_id || modelId,
-      run_id: terminalStatus.run_id,
-      runner_status: terminalStatus.status,
-      artifacts: buildArtifactUriMap(artifactDetails),
-      artifact_details: artifactDetails,
-    };
-
-    await taskStore.save({
-      ...(await expectTask(taskId)),
-      status: 'succeeded',
-      progress: 100,
-      eta: 0,
-      message: 'done',
-      errorCode: null,
-      resultPayload: result,
-      currentAttempt: context.attempts,
-      finishedAt: utcNow(),
-      workerName,
-      updatedAt: utcNow(),
-    });
-    await taskStore.appendEvent({
-      taskId,
-      eventType: 'succeeded',
-      attemptNo: context.attempts,
-      workerName,
-      message: 'blender execution succeeded',
-      detailJson: {
-        runId: terminalStatus.run_id,
-        artifacts: artifactDetails.map((artifact) => ({
-          artifact_id: artifact.artifact_id,
-          asset_uri: artifact.asset_uri,
-          kind: artifact.kind,
-        })),
-      },
-    });
-    await taskStore.saveAttempt({
-      taskId,
-      attemptNo: context.attempts,
-      status: 'succeeded',
-      workerName,
-      startedAt,
-      finishedAt: utcNow(),
-      durationMs: Date.now() - new Date(startedAt).getTime(),
-      resultPayload: result,
-    });
+      await taskStore.saveAttempt({
+        taskId,
+        attemptNo: context.attempts,
+        status: 'succeeded',
+        workerName,
+        startedAt,
+        finishedAt: utcNow(),
+        durationMs: Date.now() - new Date(startedAt).getTime(),
+        resultPayload: result,
+      });
     } finally {
       await stagedReferenceImage?.cleanup();
     }
@@ -379,6 +330,299 @@ export async function handleBlenderExecute(
   }
 }
 
+async function executeRunWithRepair(
+  session: BlenderRunSession,
+  initialScript: GeneratedBlenderScript,
+  agentContext: GenerateBlenderScriptContext,
+): Promise<BlenderRunOutcome> {
+  const maxRepairAttempts = readNonNegativeIntEnv(
+    'BLENDER_SCRIPT_REPAIR_ATTEMPTS',
+    DEFAULT_SCRIPT_REPAIR_ATTEMPTS,
+  );
+  let script = initialScript;
+  let repairAttempts = 0;
+
+  while (true) {
+    const submitted = await submitRun(session, script);
+    try {
+      const terminalStatus = await pollRunUntilTerminal(session, submitted);
+      return { repairAttempts, script, terminalStatus };
+    } catch (error) {
+      if (!isRepairableRunFailure(error) || repairAttempts >= maxRepairAttempts) {
+        throw error;
+      }
+
+      repairAttempts += 1;
+      const failure = await buildScriptFailure(error as ProviderRequestError, submitted.run_id);
+      await saveRunningState(session, 30, `repairing blender script (attempt ${repairAttempts})`);
+      await taskStore.appendEvent({
+        taskId: session.taskId,
+        eventType: 'script_repair_started',
+        attemptNo: session.attemptNo,
+        workerName: session.workerName,
+        message: `blender run failed; repairing script (attempt ${repairAttempts})`,
+        detailJson: {
+          attempt: repairAttempts,
+          error: failure.errorMessage,
+          runId: failure.runId || null,
+        },
+      });
+
+      script = await repairBlenderScript(script, session.payload, agentContext, failure);
+
+      await taskStore.appendEvent({
+        taskId: session.taskId,
+        eventType: 'script_repaired',
+        attemptNo: session.attemptNo,
+        workerName: session.workerName,
+        message: `blender script repaired (attempt ${repairAttempts})`,
+        detailJson: {
+          attempt: repairAttempts,
+          summary: script.summary,
+          threadId: script.threadId || null,
+        },
+      });
+    }
+  }
+}
+
+async function reviewPreviewAndMaybeRerun(
+  session: BlenderRunSession,
+  outcome: BlenderRunOutcome,
+  agentContext: GenerateBlenderScriptContext,
+): Promise<ReviewedRunOutcome> {
+  const reviewRounds = readNonNegativeIntEnv(
+    'BLENDER_PREVIEW_REVIEW_ROUNDS',
+    DEFAULT_PREVIEW_REVIEW_ROUNDS,
+  );
+  const reviewTimeoutMs = readPositiveIntEnv(
+    'BLENDER_PREVIEW_REVIEW_TIMEOUT_MS',
+    DEFAULT_PREVIEW_REVIEW_TIMEOUT_MS,
+  );
+  let current = outcome;
+  const reviewVerdicts: Array<Record<string, unknown>> = [];
+
+  for (let round = 1; round <= reviewRounds; round += 1) {
+    const previewArtifact = findPreviewArtifact(current.terminalStatus);
+    if (!previewArtifact) {
+      break;
+    }
+
+    let review;
+    try {
+      await saveRunningState(session, 72, 'reviewing preview render');
+      review = await withDownloadedPreview(
+        current.terminalStatus.run_id,
+        previewArtifact,
+        (previewPath) => reviewBlenderPreview(
+          current.script,
+          session.payload,
+          agentContext,
+          previewPath,
+          { turnTimeoutMs: reviewTimeoutMs },
+        ),
+      );
+    } catch (error: any) {
+      await taskStore.appendEvent({
+        taskId: session.taskId,
+        eventType: 'preview_review_skipped',
+        attemptNo: session.attemptNo,
+        workerName: session.workerName,
+        message: 'preview review failed; keeping current run result',
+        detailJson: { round, error: String(error?.message || error) },
+      });
+      break;
+    }
+
+    if (!review) {
+      break;
+    }
+
+    reviewVerdicts.push({ round, approved: review.approved, issues: review.issues });
+    await taskStore.appendEvent({
+      taskId: session.taskId,
+      eventType: 'preview_reviewed',
+      attemptNo: session.attemptNo,
+      workerName: session.workerName,
+      message: review.approved
+        ? 'preview review approved the render'
+        : `preview review found ${review.issues.length} issue(s)`,
+      detailJson: { round, approved: review.approved, issues: review.issues },
+    });
+
+    if (review.approved || !review.script) {
+      break;
+    }
+
+    try {
+      const updatedScript: GeneratedBlenderScript = { ...current.script, script: review.script };
+      const submitted = await submitRun(session, updatedScript);
+      const terminalStatus = await pollRunUntilTerminal(session, submitted);
+      current = { repairAttempts: current.repairAttempts, script: updatedScript, terminalStatus };
+      await taskStore.appendEvent({
+        taskId: session.taskId,
+        eventType: 'preview_fix_applied',
+        attemptNo: session.attemptNo,
+        workerName: session.workerName,
+        message: 'corrected script re-rendered after preview review',
+        detailJson: { round, runId: terminalStatus.run_id },
+      });
+    } catch (error: any) {
+      await taskStore.appendEvent({
+        taskId: session.taskId,
+        eventType: 'preview_fix_skipped',
+        attemptNo: session.attemptNo,
+        workerName: session.workerName,
+        message: 'corrected script re-run failed; keeping previous successful run',
+        detailJson: { round, error: String(error?.message || error) },
+      });
+      break;
+    }
+  }
+
+  return { ...current, reviewVerdicts };
+}
+
+async function submitRun(
+  session: BlenderRunSession,
+  script: GeneratedBlenderScript,
+): Promise<BlenderApiRunSubmitted> {
+  const submitted = await submitBlenderRun({
+    task_id: session.payload.taskId,
+    workflow: session.payload.workflow.id,
+    project_id: session.payload.projectId,
+    scene_id: session.payload.sceneId,
+    shot_id: session.payload.shotId,
+    pace: session.payload.pace,
+    script: script.script,
+    ...(session.referenceImage ? { reference_image: session.referenceImage } : {}),
+  });
+
+  await saveRunningState(session, 35, 'provider submitted');
+  await taskStore.appendEvent({
+    taskId: session.taskId,
+    eventType: 'provider_submitted',
+    attemptNo: session.attemptNo,
+    workerName: session.workerName,
+    message: 'blender run submitted',
+    detailJson: {
+      runId: submitted.run_id,
+      status: submitted.status,
+      statusUrl: submitted.status_url || null,
+      workflow: session.payload.workflow.id,
+      modelId: session.modelId,
+    },
+  });
+
+  return submitted;
+}
+
+async function pollRunUntilTerminal(
+  session: BlenderRunSession,
+  submitted: BlenderApiRunSubmitted,
+): Promise<BlenderApiRunStatus> {
+  let lastProviderStatus = String(submitted.status || '').trim();
+
+  return pollBlenderRunUntilTerminal(submitted, async (status) => {
+    const normalizedStatus = String(status.status || '').trim();
+    if (!normalizedStatus || normalizedStatus === lastProviderStatus) {
+      return;
+    }
+    lastProviderStatus = normalizedStatus;
+
+    await saveRunningState(session, progressForProviderStatus(normalizedStatus), `provider ${normalizedStatus}`);
+    await taskStore.appendEvent({
+      taskId: session.taskId,
+      eventType: 'provider_polled',
+      attemptNo: session.attemptNo,
+      workerName: session.workerName,
+      message: `blender run status changed to ${normalizedStatus}`,
+      detailJson: {
+        runId: status.run_id,
+        status: normalizedStatus,
+      },
+    });
+  });
+}
+
+async function saveRunningState(
+  session: BlenderRunSession,
+  progress: number,
+  message: string,
+): Promise<void> {
+  await taskStore.save({
+    ...(await expectTask(session.taskId)),
+    status: 'running',
+    progress,
+    eta: null,
+    message,
+    errorCode: null,
+    currentAttempt: session.attemptNo,
+    workerName: session.workerName,
+    updatedAt: utcNow(),
+  });
+}
+
+function isRepairableRunFailure(error: unknown): boolean {
+  return error instanceof ProviderRequestError && error.code === 'provider_run_failed';
+}
+
+async function buildScriptFailure(
+  error: ProviderRequestError,
+  runId: string,
+): Promise<BlenderScriptFailure> {
+  const logs = await fetchBlenderRunLogs(runId).catch(() => []);
+  const logsTail = logs
+    .slice(-RUN_LOG_TAIL_LIMIT)
+    .map((entry) => `${entry.stream}: ${entry.message}`);
+
+  return {
+    errorMessage: error.message,
+    logsTail,
+    runId,
+  };
+}
+
+async function withDownloadedPreview<T>(
+  runId: string,
+  artifact: Pick<BlenderApiArtifactMetadata, 'artifact_id' | 'filename' | 'content_type'>,
+  callback: (previewPath: string) => Promise<T>,
+): Promise<T> {
+  const downloaded = await downloadBlenderRunArtifact(runId, artifact);
+  const tempDirectory = await mkdtemp(join(tmpdir(), 'comfyui-blender-preview-'));
+  try {
+    const previewPath = join(tempDirectory, 'preview.png');
+    await writeFile(previewPath, downloaded.buffer);
+    return await callback(previewPath);
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+function readNonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
 async function stageReferenceImage(projectId: string, assetUri: string | null) {
   if (!assetUri) {
     return null;
@@ -410,146 +654,6 @@ async function stageReferenceImage(projectId: string, assetUri: string | null) {
     }
     throw error;
   }
-}
-
-async function uploadArtifacts(
-  taskId: string,
-  projectId: string,
-  terminalStatus: BlenderApiRunStatus,
-  attemptNo: number,
-  workerName: string,
-): Promise<Array<Record<string, unknown>>> {
-  const artifacts = normalizeRequiredArtifacts(terminalStatus);
-  const uploadedArtifacts: Array<Record<string, unknown>> = [];
-
-  for (const artifact of artifacts) {
-    const downloaded = await downloadBlenderRunArtifact(terminalStatus.run_id, artifact);
-    if (!downloaded.buffer.byteLength) {
-      throw new ProviderRequestError(
-        `Blender API returned an empty artifact: ${artifact.kind}`,
-        502,
-        'provider_empty_artifact',
-        {
-          artifact_id: artifact.artifact_id,
-          filename: artifact.filename || null,
-          kind: artifact.kind,
-          run_id: terminalStatus.run_id,
-        },
-      );
-    }
-    const uploaded = await uploadWorkerAsset(projectId, 'blender', {
-      buffer: downloaded.buffer,
-      contentType: downloaded.contentType,
-      filenameHint: downloaded.filename,
-    });
-    const detail = buildUploadedArtifactDetail(artifact, uploaded);
-    uploadedArtifacts.push(detail);
-
-    await taskStore.appendEvent({
-      taskId,
-      eventType: 'asset_uploaded',
-      attemptNo,
-      workerName,
-      message: `uploaded blender artifact ${artifact.artifact_id}`,
-      detailJson: detail,
-    });
-  }
-
-  return uploadedArtifacts;
-}
-
-function buildUploadedArtifactDetail(
-  artifact: BlenderApiArtifactMetadata & { kind: RequiredArtifactKind },
-  uploaded: Awaited<ReturnType<typeof uploadWorkerAsset>>,
-): Record<string, unknown> {
-  return {
-    artifact_id: artifact.artifact_id,
-    kind: artifact.kind,
-    filename: uploaded.filename,
-    content_type: uploaded.contentType,
-    bytes: uploaded.bytes,
-    asset_uri: uploaded.assetUri,
-  };
-}
-
-function normalizeRequiredArtifacts(
-  terminalStatus: BlenderApiRunStatus,
-): Array<BlenderApiArtifactMetadata & { kind: RequiredArtifactKind }> {
-  const artifacts = Array.isArray(terminalStatus.artifacts) ? terminalStatus.artifacts : [];
-  const artifactByKind = new Map<RequiredArtifactKind, BlenderApiArtifactMetadata & { kind: RequiredArtifactKind }>();
-
-  for (const artifact of artifacts) {
-    const kind = inferArtifactKind(artifact);
-    if (kind && !artifactByKind.has(kind)) {
-      artifactByKind.set(kind, { ...artifact, kind });
-    }
-  }
-
-  const missingKinds = REQUIRED_ARTIFACT_KINDS.filter((kind) => !artifactByKind.has(kind));
-  if (missingKinds.length) {
-    throw new ProviderRequestError(
-      `Blender API run completed without required artifacts: ${missingKinds.join(', ')}`,
-      502,
-      'provider_missing_artifact',
-      {
-        missing_kinds: missingKinds,
-        run_id: terminalStatus.run_id,
-      },
-    );
-  }
-
-  return REQUIRED_ARTIFACT_KINDS.map((kind) => artifactByKind.get(kind) as BlenderApiArtifactMetadata & { kind: RequiredArtifactKind });
-}
-
-function inferArtifactKind(artifact: Pick<BlenderApiArtifactMetadata, 'artifact_id' | 'filename'>): RequiredArtifactKind | null {
-  const artifactId = normalizeArtifactToken(artifact.artifact_id);
-  const filename = normalizeArtifactFilename(artifact.filename);
-
-  if (artifactId === 'scene_blend' || filename === 'scene') {
-    return 'blend';
-  }
-  if (artifactId === 'model_obj' || filename === 'model') {
-    return 'model_obj';
-  }
-  if (artifactId === 'preview_png' || filename === 'preview') {
-    return 'preview';
-  }
-  if (artifactId === 'summary_json' || filename === 'summary') {
-    return 'summary';
-  }
-  if (artifactId === 'pace_json' || filename === 'pace') {
-    return 'pace';
-  }
-  if (artifactId === 'generated_scene_py' || filename === 'generated_scene') {
-    return 'generated_script';
-  }
-  return null;
-}
-
-function buildArtifactUriMap(artifacts: Array<Record<string, unknown>>): Record<RequiredArtifactKind, string> {
-  const result = {} as Record<RequiredArtifactKind, string>;
-  for (const artifact of artifacts) {
-    const kind = artifact.kind as RequiredArtifactKind;
-    result[kind] = String(artifact.asset_uri || '');
-  }
-  return result;
-}
-
-function normalizeArtifactToken(value: unknown): string {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/\.[a-z0-9]+$/i, '')
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-}
-
-function normalizeArtifactFilename(value: unknown): string {
-  return basename(String(value || '').trim() || '')
-    .toLowerCase()
-    .replace(/\.[a-z0-9]+$/i, '')
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
 }
 
 function buildSafeReferenceFilename(filename: string, contentType: string): string {

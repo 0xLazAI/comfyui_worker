@@ -50,8 +50,15 @@ export interface TaskDefinitionPayloadRuleSet {
   fields: Record<string, TaskDefinitionFieldRule>;
 }
 
+export interface TaskDefinitionExecution {
+  timeout_seconds?: number;
+  max_attempts?: number;
+  backoff_seconds?: number[];
+}
+
 export interface TaskDefinitionJson {
   consumer_key: string;
+  execution?: TaskDefinitionExecution;
   payload: TaskDefinitionPayloadRuleSet;
 }
 

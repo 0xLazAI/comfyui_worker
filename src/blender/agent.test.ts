@@ -6,6 +6,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import type { HydratedBlenderTaskPayload } from './types.js';
 import {
   buildBlenderScriptPrompt,
+  collectBlenderScriptViolations,
   generateBlenderScript,
   parseGeneratedBlenderScriptResponse,
   setBlenderScriptGeneratorForTests,
@@ -45,6 +46,15 @@ const BASE_PAYLOAD: HydratedBlenderTaskPayload = {
   projectRoot: '/data/pai-projects/demo-project',
 };
 
+const VALID_REFERENCE_ANALYSIS = {
+  blockingNotes: ['Keep a clear camera corridor to the focus object.'],
+  cameraBrief: 'Low centered camera toward the focus object.',
+  environment: ['indoor space'],
+  generationPrompt: 'Simple previs scene matching the reference image.',
+  primarySubjects: ['hero subject'],
+  sceneBrief: 'Reference scene with one hero subject and a focus object.',
+};
+
 afterEach(async () => {
   setBlenderScriptGeneratorForTests(undefined);
   vi.resetModules();
@@ -54,6 +64,8 @@ afterEach(async () => {
   delete process.env.CODEX_API_KEY;
   delete process.env.CODEX_CLI_PATH;
   delete process.env.OPENAI_CODEX_MODEL;
+  delete process.env.OPENAI_CODEX_REASONING_EFFORT;
+  delete process.env.OPENAI_CODEX_TURN_TIMEOUT_MS;
 });
 
 test('generateBlenderScript uses test override when installed', async () => {
@@ -99,60 +111,48 @@ test('generateBlenderScript uses test override when installed', async () => {
   }
 });
 
-test('parseGeneratedBlenderScriptResponse rejects scripts that do not use bpy', () => {
-  expect(() =>
-    parseGeneratedBlenderScriptResponse(
-      JSON.stringify({
-        notes: ['missing bpy'],
-        script: 'print("hello")\n',
-        summary: 'not a blender script',
-      }),
-    ),
-  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
+test('collectBlenderScriptViolations flags scripts that do not use bpy', () => {
+  const expected = 'The script must use exactly `import bpy` and direct `bpy.` access; do not alias bpy or use `from bpy import ...`.';
+
+  expect(collectBlenderScriptViolations('print("hello")\n')).toContain(expected);
+  expect(collectBlenderScriptViolations('import bpy\nprint("bpy")\n')).toContain(expected);
+  expect(
+    collectBlenderScriptViolations('import bpy\n# bpy.ops.object.select_all()\n'),
+  ).toContain(expected);
+  expect(
+    collectBlenderScriptViolations('import bpy as bp\nbp.ops.object.select_all()\n'),
+  ).toContain(expected);
+  expect(
+    collectBlenderScriptViolations('from bpy import ops\nops.object.select_all()\n'),
+  ).toContain(expected);
 });
 
-test('parseGeneratedBlenderScriptResponse rejects bpy false positives from strings and comments', () => {
-  expect(() =>
-    parseGeneratedBlenderScriptResponse(
-      JSON.stringify({
-        notes: ['string false positive'],
-        script: 'import bpy\nprint("bpy")\n',
-        summary: 'string false positive',
-      }),
-    ),
-  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
-
-  expect(() =>
-    parseGeneratedBlenderScriptResponse(
-      JSON.stringify({
-        notes: ['comment false positive'],
-        script: 'import bpy\n# bpy.ops.object.select_all()\n',
-        summary: 'comment false positive',
-      }),
-    ),
-  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
+test('collectBlenderScriptViolations accepts a clean Blender script', () => {
+  expect(
+    collectBlenderScriptViolations('import bpy\nimport mathutils\nbpy.ops.object.select_all()\n'),
+  ).toEqual([]);
 });
 
-test('parseGeneratedBlenderScriptResponse rejects bpy alias imports to keep validation style strict', () => {
-  expect(() =>
-    parseGeneratedBlenderScriptResponse(
-      JSON.stringify({
-        notes: ['alias import'],
-        script: 'import bpy as bp\nbp.ops.object.select_all()\n',
-        summary: 'alias import',
-      }),
-    ),
-  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
+test('collectBlenderScriptViolations flags unsupported engine, bpy.mathutils, and text objects', () => {
+  const eevee = collectBlenderScriptViolations(
+    "import bpy\nbpy.context.scene.render.engine = 'BLENDER_EEVEE_NEXT'\n",
+  );
+  expect(eevee.some((violation) => violation.includes('BLENDER_EEVEE_NEXT'))).toBe(true);
 
-  expect(() =>
-    parseGeneratedBlenderScriptResponse(
-      JSON.stringify({
-        notes: ['from import'],
-        script: 'from bpy import ops\nops.object.select_all()\n',
-        summary: 'from import',
-      }),
-    ),
-  ).toThrow('Codex returned a script that must use `import bpy` and direct `bpy.` access.');
+  const mathutils = collectBlenderScriptViolations(
+    'import bpy\ndirection = bpy.mathutils.Vector((0, 0, 0))\n',
+  );
+  expect(mathutils.some((violation) => violation.includes('import mathutils'))).toBe(true);
+
+  const textAdd = collectBlenderScriptViolations(
+    'import bpy\nbpy.ops.object.text_add(location=(0, 0, 0))\n',
+  );
+  expect(textAdd.some((violation) => violation.includes('on-screen text'))).toBe(true);
+
+  const fontCurve = collectBlenderScriptViolations(
+    "import bpy\ncurve = bpy.data.curves.new('label', type='FONT')\n",
+  );
+  expect(fontCurve.some((violation) => violation.includes('on-screen text'))).toBe(true);
 });
 
 test('parseGeneratedBlenderScriptResponse accepts a real Blender script shape', () => {
@@ -171,10 +171,19 @@ test('parseGeneratedBlenderScriptResponse accepts a real Blender script shape', 
   });
 });
 
+test('parseGeneratedBlenderScriptResponse rejects missing script content', () => {
+  expect(() =>
+    parseGeneratedBlenderScriptResponse(
+      JSON.stringify({ notes: [], script: '   ', summary: 'empty' }),
+    ),
+  ).toThrow('Codex returned invalid script.');
+});
+
 test('generateBlenderScript codex branch uses strict sandbox options and structured output schema', async () => {
   const threadRun = vi.fn().mockResolvedValue({
     finalResponse: JSON.stringify({
       notes: ['generated'],
+      referenceAnalysis: VALID_REFERENCE_ANALYSIS,
       script: 'import bpy\nbpy.ops.object.select_all()\n',
       summary: 'generated blender script',
     }),
@@ -224,7 +233,7 @@ test('generateBlenderScript codex branch uses strict sandbox options and structu
     expect(startThread).toHaveBeenCalledWith({
       approvalPolicy: 'never',
       model: 'gpt-test-codex',
-      modelReasoningEffort: 'low',
+      modelReasoningEffort: 'medium',
       networkAccessEnabled: false,
       sandboxMode: 'workspace-write',
       skipGitRepoCheck: true,
@@ -235,7 +244,7 @@ test('generateBlenderScript codex branch uses strict sandbox options and structu
 
     const [input, turnOptions] = threadRun.mock.calls[0] as [
       Array<{ path?: string; text?: string; type: string }>,
-      { outputSchema: unknown },
+      { outputSchema: { properties: Record<string, unknown> } },
     ];
     expect(input).toEqual([
       {
@@ -248,33 +257,296 @@ test('generateBlenderScript codex branch uses strict sandbox options and structu
       },
     ]);
     expect((input[0] as { text: string }).text).toContain('Task id: task_123');
-    expect(turnOptions).toEqual({
-      outputSchema: {
-        additionalProperties: false,
-        properties: {
-          notes: {
-            items: { type: 'string' },
-            type: 'array',
-          },
-          script: {
-            description: 'Complete executable Blender Python script.',
-            type: 'string',
-          },
-          summary: {
-            description: 'Short human-readable summary of the script.',
-            type: 'string',
-          },
-        },
-        required: ['script', 'summary', 'notes'],
-        type: 'object',
-      },
+    expect((input[0] as { text: string }).text).toContain(
+      'Populate `referenceAnalysis` first',
+    );
+    expect(turnOptions.outputSchema.properties).toHaveProperty('referenceAnalysis');
+    expect(turnOptions.outputSchema.properties).toHaveProperty('script');
+    expect(result.referenceAnalysis).toMatchObject({
+      cameraBrief: VALID_REFERENCE_ANALYSIS.cameraBrief,
+      primarySubjects: VALID_REFERENCE_ANALYSIS.primarySubjects,
     });
+    expect(result.agentInstructionsPath).toContain('agent.md');
   } finally {
     await rm(tempRoot, { force: true, recursive: true });
   }
 });
 
-test('buildBlenderScriptPrompt includes workflow context, identifiers, update prompt, and guardrails', () => {
+test('generateBlenderScript runs a violation repair turn on the same thread when needed', async () => {
+  const threadRun = vi
+    .fn()
+    .mockResolvedValueOnce({
+      finalResponse: JSON.stringify({
+        notes: ['first attempt'],
+        referenceAnalysis: VALID_REFERENCE_ANALYSIS,
+        script: "import bpy\nbpy.context.scene.render.engine = 'BLENDER_EEVEE_NEXT'\n",
+        summary: 'first attempt with violation',
+      }),
+    })
+    .mockResolvedValueOnce({
+      finalResponse: JSON.stringify({
+        notes: ['repaired'],
+        referenceAnalysis: VALID_REFERENCE_ANALYSIS,
+        script: "import bpy\nbpy.context.scene.render.engine = 'BLENDER_EEVEE'\n",
+        summary: 'repaired script',
+      }),
+    });
+  const startThread = vi.fn().mockReturnValue({
+    id: 'thread_live',
+    run: threadRun,
+  });
+
+  vi.resetModules();
+  vi.doMock('@openai/codex-sdk', () => ({
+    Codex: function CodexMock() {
+      return { startThread };
+    },
+  }));
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+
+  const { generateBlenderScript: generateBlenderScriptWithMock } = await import('./agent.js');
+  const result = await generateBlenderScriptWithMock(BASE_PAYLOAD, {
+    sourceImagePath: null,
+    workingDirectory: '/tmp/blender-job',
+  });
+
+  expect(threadRun).toHaveBeenCalledTimes(2);
+  const [repairInput] = threadRun.mock.calls[1] as [string];
+  expect(repairInput).toContain('violates the worker contract');
+  expect(repairInput).toContain('BLENDER_EEVEE_NEXT');
+  expect(result.summary).toBe('repaired script');
+  expect(result.script).toContain("'BLENDER_EEVEE'");
+});
+
+test('generateBlenderScript codex branch allows reasoning effort override', async () => {
+  const threadRun = vi.fn().mockResolvedValue({
+    finalResponse: JSON.stringify({
+      notes: ['generated'],
+      referenceAnalysis: VALID_REFERENCE_ANALYSIS,
+      script: 'import bpy\nbpy.ops.object.select_all()\n',
+      summary: 'generated blender script',
+    }),
+  });
+  const startThread = vi.fn().mockReturnValue({
+    id: 'thread_live',
+    run: threadRun,
+  });
+
+  vi.resetModules();
+  vi.doMock('@openai/codex-sdk', () => ({
+    Codex: function CodexMock() {
+      return { startThread };
+    },
+  }));
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.OPENAI_CODEX_REASONING_EFFORT = 'high';
+
+  const { generateBlenderScript: generateBlenderScriptWithMock } = await import('./agent.js');
+  await generateBlenderScriptWithMock(BASE_PAYLOAD, {
+    sourceImagePath: null,
+    workingDirectory: '/tmp/blender-job',
+  });
+
+  expect(startThread).toHaveBeenCalledWith(
+    expect.objectContaining({
+      modelReasoningEffort: 'high',
+    }),
+  );
+});
+
+test('generateBlenderScript aborts a codex turn that exceeds the turn timeout', async () => {
+  // thread.run honors the abort signal node would pass to the spawned `codex exec` child,
+  // so a hung turn rejects instead of leaking an orphaned codex process.
+  const threadRun = vi.fn().mockImplementation(
+    (_input: unknown, options: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => {
+          reject(new Error('aborted'));
+        });
+      }),
+  );
+  const startThread = vi.fn().mockReturnValue({
+    id: 'thread_live',
+    run: threadRun,
+  });
+
+  vi.resetModules();
+  vi.doMock('@openai/codex-sdk', () => ({
+    Codex: function CodexMock() {
+      return { startThread };
+    },
+  }));
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.OPENAI_CODEX_TURN_TIMEOUT_MS = '20';
+
+  const { generateBlenderScript: generateBlenderScriptWithMock } = await import('./agent.js');
+  await expect(
+    generateBlenderScriptWithMock(BASE_PAYLOAD, {
+      sourceImagePath: null,
+      workingDirectory: '/tmp/blender-job',
+    }),
+  ).rejects.toThrow(/timed out after 20ms/);
+
+  const [, options] = threadRun.mock.calls[0] as [unknown, { signal?: AbortSignal }];
+  expect(options.signal).toBeInstanceOf(AbortSignal);
+});
+
+test('repairBlenderScript resumes the original thread and returns the corrected script', async () => {
+  const threadRun = vi.fn().mockResolvedValue({
+    finalResponse: JSON.stringify({
+      notes: ['repaired'],
+      referenceAnalysis: VALID_REFERENCE_ANALYSIS,
+      script: 'import bpy\nbpy.ops.mesh.primitive_cube_add()\n',
+      summary: 'repaired after runner failure',
+    }),
+  });
+  const resumeThread = vi.fn().mockReturnValue({
+    id: 'thread_live',
+    run: threadRun,
+  });
+
+  vi.resetModules();
+  vi.doMock('@openai/codex-sdk', () => ({
+    Codex: function CodexMock() {
+      return { resumeThread, startThread: vi.fn() };
+    },
+  }));
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+
+  const { repairBlenderScript: repairWithMock } = await import('./agent.js');
+  const result = await repairWithMock(
+    {
+      notes: ['original'],
+      provider: 'codex',
+      script: 'import bpy\nbroken()\n',
+      summary: 'original script',
+      threadId: 'thread_live',
+    },
+    BASE_PAYLOAD,
+    { sourceImagePath: null, workingDirectory: '/tmp/blender-job' },
+    {
+      errorMessage: "NameError: name 'broken' is not defined",
+      logsTail: ["stderr: NameError: name 'broken' is not defined"],
+      runId: 'run_failed_1',
+    },
+  );
+
+  expect(resumeThread).toHaveBeenCalledWith(
+    'thread_live',
+    expect.objectContaining({ workingDirectory: '/tmp/blender-job' }),
+  );
+  const [repairInput] = threadRun.mock.calls[0] as [string];
+  expect(repairInput).toContain('failed to execute your previous script');
+  expect(repairInput).toContain("NameError: name 'broken' is not defined");
+  expect(result.summary).toBe('repaired after runner failure');
+  expect(result.threadId).toBe('thread_live');
+});
+
+test('reviewBlenderPreview resumes the thread with preview and reference images', async () => {
+  const threadRun = vi.fn().mockResolvedValue({
+    finalResponse: JSON.stringify({
+      approved: false,
+      issues: ['Preview is too dark to inspect.'],
+      script: 'import bpy\nbpy.ops.object.light_add(type="AREA")\n',
+    }),
+  });
+  const resumeThread = vi.fn().mockReturnValue({
+    id: 'thread_live',
+    run: threadRun,
+  });
+
+  vi.resetModules();
+  vi.doMock('@openai/codex-sdk', () => ({
+    Codex: function CodexMock() {
+      return { resumeThread, startThread: vi.fn() };
+    },
+  }));
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+
+  const { reviewBlenderPreview: reviewWithMock } = await import('./agent.js');
+  const review = await reviewWithMock(
+    {
+      notes: ['original'],
+      provider: 'codex',
+      script: 'import bpy\nbpy.ops.object.select_all()\n',
+      summary: 'original script',
+      threadId: 'thread_live',
+    },
+    BASE_PAYLOAD,
+    { sourceImagePath: '/tmp/source.png', workingDirectory: '/tmp/blender-job' },
+    '/tmp/preview.png',
+  );
+
+  expect(resumeThread).toHaveBeenCalledWith(
+    'thread_live',
+    expect.objectContaining({ workingDirectory: '/tmp/blender-job' }),
+  );
+  const [input] = threadRun.mock.calls[0] as [
+    Array<{ path?: string; text?: string; type: string }>,
+  ];
+  expect(input[0]).toMatchObject({ type: 'text' });
+  expect((input[0] as { text: string }).text).toContain('Review the rendered preview');
+  expect((input[0] as { text: string }).text).toContain('no floating, detached, or separated limbs');
+  expect(input[1]).toEqual({ path: '/tmp/preview.png', type: 'local_image' });
+  expect(input[2]).toEqual({ path: '/tmp/source.png', type: 'local_image' });
+  expect(review).toEqual({
+    approved: false,
+    issues: ['Preview is too dark to inspect.'],
+    script: 'import bpy\nbpy.ops.object.light_add(type="AREA")\n',
+  });
+});
+
+test('reviewBlenderPreview can use a shorter preview-specific turn timeout', async () => {
+  const threadRun = vi.fn().mockImplementation(
+    (_input: unknown, options: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => {
+          reject(new Error('aborted'));
+        });
+      }),
+  );
+  const resumeThread = vi.fn().mockReturnValue({
+    id: 'thread_live',
+    run: threadRun,
+  });
+
+  vi.resetModules();
+  vi.doMock('@openai/codex-sdk', () => ({
+    Codex: function CodexMock() {
+      return { resumeThread, startThread: vi.fn() };
+    },
+  }));
+
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.OPENAI_CODEX_TURN_TIMEOUT_MS = '200';
+
+  const { reviewBlenderPreview: reviewWithMock } = await import('./agent.js');
+  await expect(
+    (reviewWithMock as any)(
+      {
+        notes: ['original'],
+        provider: 'codex',
+        script: 'import bpy\nbpy.ops.object.select_all()\n',
+        summary: 'original script',
+        threadId: 'thread_live',
+      },
+      BASE_PAYLOAD,
+      { sourceImagePath: null, workingDirectory: '/tmp/blender-job' },
+      '/tmp/preview.png',
+      { turnTimeoutMs: 20 },
+    ),
+  ).rejects.toThrow(/timed out after 20ms/);
+
+  const [, options] = threadRun.mock.calls[0] as [unknown, { signal?: AbortSignal }];
+  expect(options.signal).toBeInstanceOf(AbortSignal);
+});
+
+test('buildBlenderScriptPrompt includes workflow context, identifiers, update prompt, and the agent.md contract', () => {
   const prompt = buildBlenderScriptPrompt(
     {
       ...BASE_PAYLOAD,
@@ -304,32 +576,67 @@ test('buildBlenderScriptPrompt includes workflow context, identifiers, update pr
   expect(prompt).toContain('Shot id: shot_010');
   expect(prompt).toContain('Model id: model_abc');
   expect(prompt).toContain('Task id: task_123');
+  expect(prompt).toContain('User prompt: Add a glass canopy and sharper rim light.');
   expect(prompt).toContain('Agent provider: codex');
   expect(prompt).toContain('Runner target: gpu');
   expect(prompt).toContain('Reference image path: /tmp/shot-010.png');
   expect(prompt).toContain('Update prompt: Add a glass canopy and sharper rim light.');
+  expect(prompt).toContain('Agent instructions from agent.md');
+  expect(prompt).toContain('low-poly + scene blocking + storyboard previs');
+  expect(prompt).toContain('Blender Invocation Contract');
   expect(prompt).toContain('"schema_version": "pace-1"');
-  expect(prompt).toContain('Use exactly `import bpy` and direct `bpy.` access; do not alias `bpy` or use `from bpy import ...`.');
-  expect(prompt).toContain('Always create at least one mesh named with MODEL_ID.');
-  expect(prompt).toContain('Do not save files; the worker wrapper saves .blend, OBJ, preview PNG, PACE, and summary.');
-  expect(prompt).toContain('Never create floating, detached, or separated limbs');
+  expect(prompt).toContain('PACE, TASK_ID, SCENE_ID, SHOT_ID, OUTPUT_DIR');
+  expect(prompt).toContain('Name the hero mesh with the Model id below.');
+  expect(prompt).toContain('Do not save or export files; the runner saves all artifacts.');
 });
 
 test('buildBlenderScriptPrompt constrains human body parts to stay connected', () => {
   const prompt = buildBlenderScriptPrompt(
-    BASE_PAYLOAD,
     {
-      sourceImagePath: '/tmp/action-reference.png',
+      ...BASE_PAYLOAD,
+      prompt: 'Create two action characters from the reference image.',
+    },
+    {
+      sourceImagePath: '/tmp/reference.png',
       workingDirectory: '/tmp/blender-job',
     },
   );
 
+  expect(prompt).toContain('Human anatomy continuity guardrail:');
   expect(prompt).toContain(
     'torso, pelvis, head, arms, hands, legs, and feet must read as one continuous connected body',
   );
   expect(prompt).toContain('Never create floating, detached, or separated limbs');
   expect(prompt).toContain('spaced stance or separated feet means pose spacing only');
-  expect(prompt).toContain(
-    'joined proxy meshes, overlapping cylinders/capsules, parented primitives, or simple joint spheres',
+});
+
+test('buildBlenderScriptPrompt stays scene-generic and demands image-specific analysis', () => {
+  const prompt = buildBlenderScriptPrompt(
+    {
+      ...BASE_PAYLOAD,
+      prompt: 'Match the reference composition and keep labels out of the scene.',
+    },
+    {
+      sourceImagePath: '/tmp/reference.png',
+      workingDirectory: '/tmp/blender-job',
+    },
   );
+
+  expect(prompt).toContain('Workflow: blender-create-3d');
+  expect(prompt).toContain(
+    'User prompt: Match the reference composition and keep labels out of the scene.',
+  );
+  expect(prompt).toContain('Update prompt: not provided');
+  expect(prompt).toContain(
+    'For create-3d, apply the user prompt as primary creative direction alongside the reference image and PACE.',
+  );
+  expect(prompt).toContain('Populate `referenceAnalysis` first');
+  expect(prompt).toContain(
+    '`blockingNotes` must be scene-specific and actionable for THIS reference image and PACE',
+  );
+  expect(prompt).toContain('never assume a specific sport or setting that the image does not show');
+  expect(prompt).not.toContain('hockey');
+  expect(prompt).not.toContain('stick blades must sit near the puck');
+  expect(prompt).not.toContain('referee must visibly bend');
+  expect(prompt).not.toContain('jersey trim');
 });

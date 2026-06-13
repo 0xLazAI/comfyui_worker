@@ -70,6 +70,8 @@ PACE is director intent, not raw Blender internals. Map it into readable Blender
 - Do not add readable labels, slate text, shot descriptions, prompt text, or instructional captions inside the rendered scene. Use object names, metadata, non-text arrows, color blocks, and simple geometric markers instead.
 - Preview renders must be bright enough to inspect. Use readable world color, practical lights, color management, and fill light when indoor scenes render too dark.
 - For director-facing previews, favor a clear first-frame composition over showing every modeled object.
+- For update-3d edits, the requested change must be visible in the first-frame preview. If preserved geometry hides the update, move the marker/light/camera slightly or lower/move nonessential proxy geometry while preserving the scene intent.
+- Floor rings, spot markers, target circles, and other update markers must sit slightly above the floor, use an emission or high-contrast material, and remain visible from the active camera. Avoid coplanar markers that z-fight with or disappear into the floor.
 
 ## Hero Action Pose Quality Floor
 
