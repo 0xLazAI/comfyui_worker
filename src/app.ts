@@ -9,6 +9,7 @@ import { UnauthorizedError, ValidationError, NotFoundError } from './infra/HttpE
 import { CONTRACT_VERSION, WORKER_NODE_TYPE, WORKER_TOKEN, WORKER_VERSION } from './infra/constants.js';
 import { normalizeTaskDefinitionJson } from './taskDefinitions/definitionSchema.js';
 import { taskTypeDefinitionStore } from './taskDefinitions/taskTypeDefinitionStore.js';
+import { downloadAsset } from './render/assetStore.js';
 import { supportsConsumerKey } from './tasks/taskExecution.js';
 import { getTaskResponse, listTaskEvents, listTaskObservations, submitTask } from './tasks/taskService.js';
 
@@ -172,6 +173,20 @@ export function createApp(): express.Express {
       throw new NotFoundError('Task not found');
     }
     res.json(task);
+  });
+
+  app.get('/assets', async (req, res) => {
+    requireBearer(req.header('authorization') || undefined);
+    const projectId = requireString(req.query.project_id, 'project_id');
+    const assetUri = requireString(req.query.asset_uri, 'asset_uri');
+    const asset = await downloadAsset(projectId, assetUri);
+    res.setHeader('cache-control', 'no-store');
+    res.setHeader('content-type', asset.contentType);
+    res.setHeader(
+      'content-disposition',
+      `inline; filename="${asset.filename.replace(/["\\]/g, '_')}"`,
+    );
+    res.send(asset.buffer);
   });
 
   app.get('/task-definitions', async (req, res) => {

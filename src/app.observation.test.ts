@@ -12,12 +12,16 @@ const taskServiceMock = {
   listTaskObservations: vi.fn(),
   submitTask: vi.fn(),
 };
+const assetStoreMock = {
+  downloadAsset: vi.fn(),
+};
 
 vi.mock('./taskDefinitions/taskTypeDefinitionStore.js', () => ({
   taskTypeDefinitionStore: taskTypeDefinitionStoreMock,
 }));
 
 vi.mock('./tasks/taskService.js', () => taskServiceMock);
+vi.mock('./render/assetStore.js', () => assetStoreMock);
 
 const { createApp } = await import('./app.js');
 
@@ -30,6 +34,7 @@ beforeEach(() => {
   taskServiceMock.listTaskEvents.mockReset();
   taskServiceMock.listTaskObservations.mockReset();
   taskServiceMock.submitTask.mockReset();
+  assetStoreMock.downloadAsset.mockReset();
 });
 
 afterEach(async () => {
@@ -136,4 +141,30 @@ test('GET /tasks/:taskId/events returns 404 when the task is missing', async () 
   });
 
   expect(response.status).toBe(404);
+});
+
+test('GET /assets returns an authorized worker asset download', async () => {
+  assetStoreMock.downloadAsset.mockResolvedValueOnce({
+    assetUri: 'assets://uploads/reference.png',
+    buffer: Buffer.from('image-bytes'),
+    contentType: 'image/png',
+    filename: 'reference.png',
+  });
+
+  const response = await request(
+    '/assets?project_id=project_1&asset_uri=assets%3A%2F%2Fuploads%2Freference.png',
+    {
+      headers: {
+        authorization: 'Bearer demo-worker-token',
+      },
+    },
+  );
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get('content-type')).toContain('image/png');
+  expect(Buffer.from(await response.arrayBuffer()).toString()).toBe('image-bytes');
+  expect(assetStoreMock.downloadAsset).toHaveBeenCalledWith(
+    'project_1',
+    'assets://uploads/reference.png',
+  );
 });

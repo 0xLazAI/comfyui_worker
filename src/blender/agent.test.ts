@@ -312,4 +312,24 @@ test('buildBlenderScriptPrompt includes workflow context, identifiers, update pr
   expect(prompt).toContain('Use exactly `import bpy` and direct `bpy.` access; do not alias `bpy` or use `from bpy import ...`.');
   expect(prompt).toContain('Always create at least one mesh named with MODEL_ID.');
   expect(prompt).toContain('Do not save files; the worker wrapper saves .blend, OBJ, preview PNG, PACE, and summary.');
+  expect(prompt).toContain('Never create floating, detached, or separated limbs');
+});
+
+test('buildBlenderScriptPrompt constrains human body parts to stay connected', () => {
+  const prompt = buildBlenderScriptPrompt(
+    BASE_PAYLOAD,
+    {
+      sourceImagePath: '/tmp/action-reference.png',
+      workingDirectory: '/tmp/blender-job',
+    },
+  );
+
+  expect(prompt).toContain(
+    'torso, pelvis, head, arms, hands, legs, and feet must read as one continuous connected body',
+  );
+  expect(prompt).toContain('Never create floating, detached, or separated limbs');
+  expect(prompt).toContain('spaced stance or separated feet means pose spacing only');
+  expect(prompt).toContain(
+    'joined proxy meshes, overlapping cylinders/capsules, parented primitives, or simple joint spheres',
+  );
 });
