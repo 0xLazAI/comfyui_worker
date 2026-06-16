@@ -27,7 +27,7 @@ export async function submitStephenRender(
 ): Promise<StephenRenderStatus> {
   ensureBaseUrl();
   const submitUrl = new URL(
-    `/api/project/${encodeURIComponent(payload.projectId)}/scene/${encodeURIComponent(payload.panel.sceneId)}/shot/${encodeURIComponent(payload.panel.shotId)}/panel/${encodeURIComponent(payload.panel.panelNumber)}/render`,
+    `/api/project/${encodeURIComponent(payload.projectId)}/scene/${encodeURIComponent(payload.panel.providerSceneId)}/shot/${encodeURIComponent(payload.panel.providerShotId)}/panel/${encodeURIComponent(payload.panel.panelNumber)}/render`,
     STEPHEN_RENDER_BASE_URL,
   );
 

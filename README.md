@@ -1,6 +1,6 @@
 # ComfyUI Worker
 
-一个对齐 PAI worker contract 的 `render_panel` worker。
+一个对齐 `pai_platform/develop` 新版 PAI worker contract 的 `render_panel` worker。
 
 对外：
 
@@ -19,7 +19,42 @@
 - API 进程只负责持久化并入 Redis 队列
 - queue worker 异步执行真正的 render
 - provider 目前接 Stephen 平台异步 render API
-- 最终图片上传到 S3 / Object Storage，结果只回 `assets://renders/...`
+- worker 注册、心跳、PACE 文件读写优先通过 Pai Platform API
+- 结果图片当前仍保留 S3 / Object Storage 兼容上传层，结果回 `assets://renders/...`
+
+## Platform Mode
+
+当前实现优先按 `pai_platform` `develop` 分支的新 contract 运行：
+
+- worker 注册：`POST /api/workers/register`
+- worker 心跳：`POST /api/workers/{worker_name}/heartbeat`
+- PACE 文件读写：`GET|POST /api/{project_id}/pace/files`
+- 资产下载：`GET /api/{project_id}/assets/url`
+
+需要的核心配置：
+
+- `PAI_PLATFORM_API_BASE`
+- `PAI_PLATFORM_API_KEY`
+- `PAI_PLATFORM_BEARER_TOKEN`
+
+说明：
+
+- `PAI_PLATFORM_API_KEY` 目前用于平台注册相关接口
+- `PAI_PLATFORM_BEARER_TOKEN` 用于当前 `develop` 分支里仍然要求用户态 Bearer token 的 PACE / assets 路由
+- 如果平台后续把这些路由统一成服务态鉴权，可以再收回这一层
+
+当前仍然保留一层兼容逻辑：
+
+- 结果图上传和 multipart 源图上传暂时仍可直连对象存储
+- 原因是 `pai_platform` 现有 `POST /api/{project_id}/assets/upload-url` 还只支持 storyboard pdf/html，不够通用到 `image/png + assets://renders/...`
+
+所以当前状态是：
+
+- 注册：平台 API
+- 心跳：平台 API
+- PACE：平台 API
+- 源图下载：平台 API
+- 图片上传：临时 S3 fallback
 
 ## Task Contract
 
@@ -32,7 +67,7 @@
 ```json
 {
   "workflow": "bg_retouch_preserve_subject_v1",
-  "panelId": "scene_02_shot_01_panel_0001",
+  "panelId": "ps002_sh001_p0001",
   "prompt": {
     "text": "Keep the three foreground characters unchanged...",
     "negativeText": "Do not change the foreground people..."
@@ -61,7 +96,10 @@ worker 收到文件后会先上传到对象存储，再自动写回 `payload.inp
 约束：
 
 - `workflow` 必填
-- `panelId` 必须符合 `scene_<id>_shot_<id>_panel_<id>`
+- `panelId` 推荐使用 canonical 形式：
+  - `ps001_sh001_p0001`
+- 兼容旧输入：
+  - `scene_02_shot_01_panel_0001`
 - 输入图片可以直接传 `assets://`，也可以通过 `multipart/form-data` 上传源文件
 - `backend`、`base_model`、`positive`、`negative` 不属于公共 contract，不允许直接出现在 payload 顶层
 
@@ -210,7 +248,13 @@ const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
 - `worker_name` 用来决定把这个任务注册到哪个 worker 目录
 - 它只影响注册文件写入，不参与任务消费逻辑
 
-创建、更新、删除任务定义成功后，服务会立刻按 `worker_name` 重写：
+创建、更新、删除任务定义成功后，服务会立刻按 `worker_name` 重新发布注册信息。
+
+当前主路径是：
+
+- 调 Pai Platform 的 worker 注册 API
+
+兼容模式下才会写：
 
 - `/data/pai-projects/.pai-workers/<worker_name>/schema.json`
 - `/data/pai-projects/.pai-workers/<worker_name>/credentials.json`
@@ -288,7 +332,7 @@ curl -X POST 'http://host/task-definitions' \
 4. 确定这个任务应该归属哪个 `worker_name`
 5. 如果需要，补对应的 provider / asset / sidecar 逻辑
 6. 通过 `POST /task-definitions` 创建启用中的定义
-7. 检查 `/data/pai-projects/.pai-workers/<worker_name>/schema.json` 是否已更新
+7. 检查该 `worker_name` 在 Pai Platform 中是否已更新
 8. 调 `GET /capabilities` 确认新 `task_type` 已经暴露
 9. 用 `POST /tasks` 提一条最小任务
 10. 轮询 `GET /tasks/{task_id}` 验证最终状态
@@ -309,15 +353,38 @@ curl -X POST 'http://host/task-definitions' \
 
 另外，`GET /capabilities` 返回的 `supported_tasks` 是从数据库里启用中的定义动态生成的，不是硬编码列表。
 
+## PACE Outputs
+
+新 contract 下，worker 不再依赖 `storyboard/*.outputs.json`。
+
+当前成功任务会把结果写回：
+
+- `scenes/<scene_id>/shots/<shot_id>/manifest.json`
+- 具体是往 `artifacts[]` 里追加一条记录
+
+记录内容至少包括：
+
+- `kind`
+- `uri`
+- `panel_id`
+- `created_at`
+
+其中：
+
+- `uri` 是 `assets://renders/...`
+- `panel_id` 使用 canonical panel id
+
+旧的 `storyboard/*.outputs.json` 只作为兼容模式保留，不再是主路径。
+
 ## Storage
 
-项目目录只写 metadata sidecar：
-
-- `scenes/<scene_id>/shots/<shot_id>/storyboard/<panel_id>.outputs.json`
-
-最终图片只写对象存储：
+最终图片仍然上传到对象存储：
 
 - `assets://renders/YYYYMMDD-<random>.png`
+
+源图如果走 `multipart/form-data` 上传，也会先落成：
+
+- `assets://uploads/YYYYMMDD-<random>.png`
 
 任务状态与时间线落数据库：
 

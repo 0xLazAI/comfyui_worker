@@ -1,5 +1,5 @@
 import path from 'path';
-import { PROJECTS_ROOT } from '../infra/constants.js';
+import { PLATFORM_API_ENABLED, PROJECTS_ROOT } from '../infra/constants.js';
 import { ValidationError } from '../infra/HttpError.js';
 import { parsePanelId, type ParsedPanelId } from './panelId.js';
 import { getWorkflowDefinition, type WorkflowDefinition } from './workflowCatalog.js';
@@ -101,16 +101,15 @@ function extractPanel(payload: Record<string, unknown>): ParsedPanelId {
   const legacyPanel = payload.panel;
   if (legacyPanel && typeof legacyPanel === 'object' && !Array.isArray(legacyPanel)) {
     const panel = legacyPanel as Record<string, unknown>;
-    const panelPanelId = requireString(panel.panelId, 'payload.panel.panelId');
+    const panelPanelId = optionalString(panel.panelId);
+    if (panelPanelId) {
+      return parsePanelId(panelPanelId);
+    }
+
     const sceneId = requireString(panel.sceneId, 'payload.panel.sceneId');
     const shotId = requireString(panel.shotId, 'payload.panel.shotId');
     const panelNumber = requireString(panel.panelNumber, 'payload.panel.panelNumber');
-    return {
-      panelId: panelPanelId,
-      sceneId,
-      shotId,
-      panelNumber,
-    };
+    return parsePanelId(`${sceneId}_${shotId}_panel_${panelNumber}`);
   }
 
   throw new ValidationError('payload.panelId is required');
@@ -183,6 +182,9 @@ function normalizeTypedValue(
 
 export function normalizeProjectRoot(projectRoot: string): string {
   const normalized = requireString(projectRoot, 'project_root');
+  if (PLATFORM_API_ENABLED) {
+    return normalized;
+  }
   const resolvedRoot = path.resolve(normalized);
   const resolvedProjectsRoot = path.resolve(PROJECTS_ROOT);
   if (!resolvedRoot.startsWith(`${resolvedProjectsRoot}${path.sep}`) && resolvedRoot !== resolvedProjectsRoot) {

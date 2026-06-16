@@ -7,7 +7,9 @@ import {
   PAI_ASSET_PREFIX_TEMPLATE,
   PAI_ASSET_REGION,
   PAI_ASSET_SECRET_ACCESS_KEY,
+  PLATFORM_API_ENABLED,
 } from '../infra/constants.js';
+import { paiPlatformClient } from '../platform/paiPlatformClient.js';
 
 export interface DownloadedAsset {
   assetUri: string;
@@ -27,6 +29,10 @@ let client: S3Client | null = null;
 
 export async function downloadAsset(projectId: string, assetUri: string): Promise<DownloadedAsset> {
   const normalizedUri = normalizeAssetUri(assetUri);
+  if (PLATFORM_API_ENABLED) {
+    return downloadAssetViaPaiPlatform(projectId, normalizedUri);
+  }
+
   const key = buildObjectKey(projectId, normalizedUri);
   const result = await getS3Client().send(new GetObjectCommand({
     Bucket: PAI_ASSET_BUCKET,
@@ -42,6 +48,26 @@ export async function downloadAsset(projectId: string, assetUri: string): Promis
     buffer: Buffer.from(bytes),
     contentType: String(result.ContentType || guessContentTypeFromFilename(normalizedUri)),
     filename: normalizedUri.slice('assets://'.length).split('/').pop() || 'asset.bin',
+  };
+}
+
+async function downloadAssetViaPaiPlatform(projectId: string, assetUri: string): Promise<DownloadedAsset> {
+  const downloadUrl = await paiPlatformClient.resolveAssetDownloadUrl(projectId, assetUri);
+  const response = await fetch(downloadUrl, {
+    method: 'GET',
+  });
+  if (!response.ok) {
+    throw new Error(`asset download failed with HTTP ${response.status} for ${assetUri}`);
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const contentType = String(response.headers.get('content-type') || guessContentTypeFromFilename(assetUri));
+
+  return {
+    assetUri,
+    buffer: Buffer.from(bytes),
+    contentType,
+    filename: filenameFromUri(assetUri),
   };
 }
 
@@ -130,6 +156,10 @@ function normalizeAssetUri(assetUri: string): string {
     throw new Error(`assetUri must start with assets://: ${normalized || '(empty)'}`);
   }
   return normalized;
+}
+
+function filenameFromUri(assetUri: string): string {
+  return assetUri.slice('assets://'.length).split('/').pop() || 'asset.bin';
 }
 
 function normalizePrefix(prefix: string): string {

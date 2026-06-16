@@ -1,6 +1,8 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { PLATFORM_API_ENABLED } from '../infra/constants.js';
 import { atomicWriteJson, ensureDirectory, readJsonFile } from '../infra/filesystem.js';
+import { PaiPlatformApiError, paiPlatformClient } from '../platform/paiPlatformClient.js';
 import type { NormalizedRenderPanelPayload } from './payload.js';
 
 interface StoryboardOutputDocument {
@@ -8,6 +10,15 @@ interface StoryboardOutputDocument {
   scene_id: string;
   shot_id: string;
   outputs: StoryboardOutputRecord[];
+}
+
+export interface RenderPanelProjectContext {
+  manifestPath: string;
+  shotManifestPath: string;
+  panelPath: string;
+  manifest: Record<string, unknown> | null;
+  shotManifest: Record<string, unknown> | null;
+  panel: Record<string, unknown> | null;
 }
 
 export interface StoryboardOutputRecord {
@@ -30,8 +41,13 @@ export interface StoryboardOutputRecord {
 export async function writeStoryboardOutputSidecar(
   payload: NormalizedRenderPanelPayload,
   output: StoryboardOutputRecord,
+  context?: RenderPanelProjectContext,
 ): Promise<string> {
-  const shotRoot = path.join(payload.projectRoot, 'scenes', payload.panel.sceneId, 'shots', payload.panel.shotId);
+  if (PLATFORM_API_ENABLED) {
+    return writePaceArtifactReference(payload, output, context || await loadRenderPanelProjectContext(payload));
+  }
+
+  const shotRoot = legacyShotRootPath(payload);
   const stat = await fs.stat(shotRoot).catch(() => null);
   if (!stat?.isDirectory()) {
     throw new Error(`Shot storyboard directory is missing: ${shotRoot}`);
@@ -39,20 +55,63 @@ export async function writeStoryboardOutputSidecar(
 
   const storyboardDir = path.join(shotRoot, 'storyboard');
   await ensureDirectory(storyboardDir);
-  const sidecarPath = path.join(storyboardDir, `${payload.panel.panelId}.outputs.json`);
+  const sidecarPath = path.join(storyboardDir, `${payload.panel.providerPanelId}.outputs.json`);
 
   const existing = await readExistingSidecar(sidecarPath);
   const outputs = existing.outputs.filter((entry) => entry.task_id !== output.task_id);
   outputs.push(output);
 
   await atomicWriteJson(sidecarPath, {
-    panel_id: payload.panel.panelId,
-    scene_id: payload.panel.sceneId,
-    shot_id: payload.panel.shotId,
+    panel_id: payload.panel.providerPanelId,
+    scene_id: payload.panel.providerSceneId,
+    shot_id: payload.panel.providerShotId,
     outputs,
   } satisfies StoryboardOutputDocument);
 
   return sidecarPath;
+}
+
+export async function loadRenderPanelProjectContext(
+  payload: NormalizedRenderPanelPayload,
+): Promise<RenderPanelProjectContext> {
+  const manifestPath = 'manifest.yaml';
+  const shotManifestPath = paceShotManifestPath(payload);
+  const panelPath = pacePanelPath(payload);
+
+  if (PLATFORM_API_ENABLED) {
+    const manifest = await readRequiredPaceObject(payload.projectId, manifestPath, 'Project manifest file');
+    const project = optionalString(manifest.project);
+    if (project && project !== payload.projectId) {
+      throw new Error(`Project manifest project mismatch: expected ${payload.projectId}, got ${project}`);
+    }
+
+    const shotManifest = await readRequiredPaceObject(payload.projectId, shotManifestPath, 'Shot manifest file');
+    const panel = await readRequiredPaceObject(payload.projectId, panelPath, 'Panel file');
+
+    return {
+      manifestPath,
+      shotManifestPath,
+      panelPath,
+      manifest,
+      shotManifest,
+      panel,
+    };
+  }
+
+  const shotRoot = legacyShotRootPath(payload);
+  const stat = await fs.stat(shotRoot).catch(() => null);
+  if (!stat?.isDirectory()) {
+    throw new Error(`Shot storyboard directory is missing: ${shotRoot}`);
+  }
+
+  return {
+    manifestPath,
+    shotManifestPath,
+    panelPath,
+    manifest: null,
+    shotManifest: null,
+    panel: null,
+  };
 }
 
 async function readExistingSidecar(sidecarPath: string): Promise<StoryboardOutputDocument> {
@@ -73,4 +132,85 @@ async function readExistingSidecar(sidecarPath: string): Promise<StoryboardOutpu
     shot_id: matched?.[2] || '',
     outputs: [],
   };
+}
+
+async function writePaceArtifactReference(
+  payload: NormalizedRenderPanelPayload,
+  output: StoryboardOutputRecord,
+  context: RenderPanelProjectContext,
+): Promise<string> {
+  const shotManifest = cloneObject(context.shotManifest, context.shotManifestPath, 'Shot manifest file');
+  const existingArtifacts = Array.isArray(shotManifest.artifacts) ? [...shotManifest.artifacts] : [];
+  const artifact = {
+    kind: 'v1_storyboard',
+    uri: output.render_uri,
+    panel_id: payload.panel.panelId,
+    created_at: output.created_at,
+    note: payload.prompt.text,
+    task_id: output.task_id,
+    filename: output.filename,
+    workflow: output.workflow,
+    seed: output.seed,
+    source_image_uri: output.source_image_uri,
+    extra_params: output.extra_params,
+    provider: output.provider,
+    backend: payload.workflow.backend,
+  };
+
+  const nextArtifacts = existingArtifacts.filter((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return true;
+    }
+    return optionalString((entry as Record<string, unknown>).task_id) !== output.task_id;
+  });
+  nextArtifacts.push(artifact);
+  shotManifest.artifacts = nextArtifacts;
+
+  await paiPlatformClient.writePaceFiles(payload.projectId, {
+    writes: [{
+      path: context.shotManifestPath,
+      value: shotManifest,
+    }],
+  });
+
+  return context.shotManifestPath;
+}
+
+async function readRequiredPaceObject(
+  projectId: string,
+  pacePath: string,
+  label: string,
+): Promise<Record<string, unknown>> {
+  try {
+    const response = await paiPlatformClient.readPaceFile(projectId, pacePath);
+    return cloneObject(response.value, pacePath, label);
+  } catch (error: unknown) {
+    if (error instanceof PaiPlatformApiError && error.statusCode === 404) {
+      throw new Error(`${label} is missing: ${pacePath}`);
+    }
+    throw error;
+  }
+}
+
+function cloneObject(value: unknown, pacePath: string, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} is not an object: ${pacePath}`);
+  }
+  return structuredClone(value as Record<string, unknown>);
+}
+
+function paceShotManifestPath(payload: NormalizedRenderPanelPayload): string {
+  return `scenes/${payload.panel.sceneId}/shots/${payload.panel.shotId}/manifest.json`;
+}
+
+function pacePanelPath(payload: NormalizedRenderPanelPayload): string {
+  return `scenes/${payload.panel.sceneId}/shots/${payload.panel.shotId}/panels/${payload.panel.panelId}.json`;
+}
+
+function legacyShotRootPath(payload: NormalizedRenderPanelPayload): string {
+  return path.join(payload.projectRoot, 'scenes', payload.panel.providerSceneId, 'shots', payload.panel.providerShotId);
+}
+
+function optionalString(value: unknown): string {
+  return String(value || '').trim();
 }

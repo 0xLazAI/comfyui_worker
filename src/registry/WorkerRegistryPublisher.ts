@@ -4,6 +4,7 @@ import {
   BASE_URL,
   CONTRACT_VERSION,
   HEARTBEAT_INTERVAL_SECONDS,
+  PLATFORM_API_ENABLED,
   REGISTRY_ROOT,
   WORKER_NODE_TYPE,
   WORKER_TOKEN,
@@ -13,12 +14,15 @@ import { getSupportedWorkflows, RENDER_PANEL_TASK_TYPE } from '../render/workflo
 import { taskTypeDefinitionStore } from '../taskDefinitions/taskTypeDefinitionStore.js';
 import type { TaskDefinitionJson, TaskTypeDefinitionRecord } from '../taskDefinitions/types.js';
 import { atomicWriteJson, atomicWriteText, ensureDirectory } from '../infra/filesystem.js';
+import { paiPlatformClient } from '../platform/paiPlatformClient.js';
 
 export class WorkerRegistryPublisher {
   private timer: NodeJS.Timeout | null = null;
 
   async start(): Promise<void> {
-    await ensureDirectory(REGISTRY_ROOT);
+    if (!PLATFORM_API_ENABLED) {
+      await ensureDirectory(REGISTRY_ROOT);
+    }
     await this.publishStaticFiles();
     await this.publishHeartbeatFiles('online', 'idle');
     this.timer = setInterval(() => {
@@ -37,6 +41,13 @@ export class WorkerRegistryPublisher {
   async publishStaticFiles(): Promise<void> {
     const taskDefinitions = await taskTypeDefinitionStore.list({ enabled: true });
     const grouped = groupTaskDefinitionsByWorker(taskDefinitions);
+    if (PLATFORM_API_ENABLED) {
+      for (const [workerName, definitions] of Object.entries(grouped)) {
+        await this.publishStaticFilesForWorker(workerName, definitions);
+      }
+      return;
+    }
+
     const activeWorkerNames = new Set(Object.keys(grouped));
     const existingWorkerNames = await this.listRegistryWorkerNames();
 
@@ -58,7 +69,11 @@ export class WorkerRegistryPublisher {
     }
     const taskDefinitions = await taskTypeDefinitionStore.listEnabledByWorkerName(normalizedWorkerName);
     if (!taskDefinitions.length) {
-      await this.removeWorkerDir(normalizedWorkerName);
+      if (PLATFORM_API_ENABLED) {
+        await this.publishStaticFilesForWorker(normalizedWorkerName, []);
+      } else {
+        await this.removeWorkerDir(normalizedWorkerName);
+      }
       return;
     }
 
@@ -67,6 +82,20 @@ export class WorkerRegistryPublisher {
   }
 
   private async publishStaticFilesForWorker(workerName: string, taskDefinitions: TaskTypeDefinitionRecord[]): Promise<void> {
+    if (PLATFORM_API_ENABLED) {
+      await paiPlatformClient.registerNamedWorker(workerName, {
+        schema: this.schemaPayload(workerName, taskDefinitions),
+        credentials: this.credentialsPayload(),
+        heartbeat: {
+          heartbeat_at: new Date().toISOString(),
+          status: 'online',
+          message: 'idle',
+        },
+        descriptionMd: this.descriptionMarkdown(workerName, taskDefinitions),
+      });
+      return;
+    }
+
     const workerDir = this.workerDir(workerName);
     await ensureDirectory(workerDir);
     await atomicWriteJson(path.join(workerDir, 'schema.json'), this.schemaPayload(workerName, taskDefinitions));
@@ -75,13 +104,24 @@ export class WorkerRegistryPublisher {
   }
 
   private async publishHeartbeatFiles(status: string, message: string): Promise<void> {
-    const workerNames = await this.listRegistryWorkerNames();
+    const workerNames = PLATFORM_API_ENABLED
+      ? await taskTypeDefinitionStore.listEnabledWorkerNames()
+      : await this.listRegistryWorkerNames();
     for (const workerName of workerNames) {
       await this.publishHeartbeatForWorker(workerName, status, message);
     }
   }
 
   private async publishHeartbeatForWorker(workerName: string, status: string, message: string): Promise<void> {
+    if (PLATFORM_API_ENABLED) {
+      await paiPlatformClient.heartbeatWorker(workerName, {
+        heartbeat_at: new Date().toISOString(),
+        status,
+        message,
+      });
+      return;
+    }
+
     await atomicWriteJson(path.join(this.workerDir(workerName), 'heartbeat.json'), {
       heartbeat_at: new Date().toISOString(),
       status,
@@ -130,8 +170,9 @@ export class WorkerRegistryPublisher {
       '',
       `- 当前启用任务：${taskDefinitions.map((definition) => `\`${definition.taskType}\``).join(', ') || '无'}`,
       '- payload 校验规则来自数据库里的 task_type_definitions.definition_json',
-      '- 输入图片必须使用 `assets://` 引用，不接受外部图片链接',
-      '- 最终图片上传到对象存储，并把 `assets://renders/...` 写回 storyboard outputs sidecar',
+      '- 输入图片长期引用必须使用 `assets://`',
+      '- 新 Worker 通过 Pai Platform API 注册、更新心跳、读写 PACE 文件',
+      '- 最终图片长期引用写回 `manifest.artifacts`，不再依赖旧的 storyboard sidecar',
       '',
     ].join('\n');
   }

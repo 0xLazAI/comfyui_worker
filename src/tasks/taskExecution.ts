@@ -9,12 +9,13 @@ import {
   submitStephenRender,
   type StephenRenderStatus,
 } from '../render/stephenRenderClient.js';
-import { writeStoryboardOutputSidecar } from '../render/storyboardOutputs.js';
+import { loadRenderPanelProjectContext, writeStoryboardOutputSidecar, type RenderPanelProjectContext } from '../render/storyboardOutputs.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
 import { readTaskDefinitionBinding } from '../taskDefinitions/definitionSchema.js';
 import { taskStore } from './taskStore.js';
 import { isTerminalWorkerTaskStatus, utcNow } from './types.js';
-import { WORKER_NAME } from '../infra/constants.js';
+import { PLATFORM_API_ENABLED, WORKER_NAME } from '../infra/constants.js';
+import { PaiPlatformApiError } from '../platform/paiPlatformClient.js';
 
 const RENDER_PANEL_CONSUMER_KEY = 'render_panel_consumer';
 
@@ -93,6 +94,19 @@ export async function handleRenderPanelExecute(
   });
 
   try {
+    const projectContext = await loadProjectContext(payload);
+    await taskStore.save({
+      ...(await expectTask(taskId)),
+      status: 'running',
+      progress: 5,
+      eta: null,
+      message: 'resolving source image',
+      errorCode: null,
+      currentAttempt: context.attempts,
+      workerName,
+      updatedAt: utcNow(),
+    });
+
     const sourceImage = await downloadSourceImage(payload);
     logger.info('task=%s source asset downloaded uri=%s bytes=%d', taskId, sourceImage.assetUri, sourceImage.buffer.byteLength);
 
@@ -203,7 +217,7 @@ export async function handleRenderPanelExecute(
       updatedAt: utcNow(),
     });
 
-    await writeStoryboardOutputSidecar(payload, {
+    const metadataPath = await writeStoryboardOutputSidecar(payload, {
       task_id: taskId,
       task_type: 'render_panel',
       workflow: payload.workflow.id,
@@ -218,22 +232,18 @@ export async function handleRenderPanelExecute(
         workflow: payload.workflow.providerWorkflowId,
       },
       created_at: utcNow(),
-    }).catch((error: unknown) => {
-      if (error instanceof Error && error.message.includes('Shot storyboard directory is missing')) {
-        throw new TaskRejectedError(error.message, 'storyboard_target_missing');
-      }
-      throw error;
-    });
+    }, projectContext);
     await taskStore.appendEvent({
       taskId,
       eventType: 'metadata_written',
       attemptNo: context.attempts,
       workerName,
-      message: 'storyboard outputs metadata written',
+      message: PLATFORM_API_ENABLED ? 'PACE artifact metadata written' : 'storyboard outputs metadata written',
       detailJson: {
         panelId: payload.panel.panelId,
         sceneId: payload.panel.sceneId,
         shotId: payload.panel.shotId,
+        metadataPath,
       },
     });
 
@@ -249,6 +259,7 @@ export async function handleRenderPanelExecute(
         providerJobId: terminalStatus.job_id,
         providerWorkflow: payload.workflow.providerWorkflowId,
         resolvedBaseModel: payload.workflow.baseModel,
+        metadataPath,
       },
     };
 
@@ -427,8 +438,36 @@ async function downloadSourceImage(payload: NormalizedRenderPanelPayload) {
     return await downloadAsset(payload.projectId, payload.inputs.imageAssetUri || '');
   } catch (error: any) {
     const message = String(error?.message || error || '');
+    if (error instanceof PaiPlatformApiError && error.statusCode === 404) {
+      throw new TaskRejectedError(`source image asset does not exist: ${payload.inputs.imageAssetUri}`, 'source_asset_missing');
+    }
     if (error?.name === 'NoSuchKey' || message.includes('NoSuchKey') || message.includes('The specified key does not exist')) {
       throw new TaskRejectedError(`source image asset does not exist: ${payload.inputs.imageAssetUri}`, 'source_asset_missing');
+    }
+    throw error;
+  }
+}
+
+async function loadProjectContext(payload: NormalizedRenderPanelPayload): Promise<RenderPanelProjectContext> {
+  try {
+    return await loadRenderPanelProjectContext(payload);
+  } catch (error: unknown) {
+    if (error instanceof Error) {
+      if (error.message.startsWith('Project manifest file is missing:')) {
+        throw new TaskRejectedError(error.message, 'project_manifest_missing');
+      }
+      if (error.message.startsWith('Shot manifest file is missing:')) {
+        throw new TaskRejectedError(error.message, 'shot_manifest_missing');
+      }
+      if (error.message.startsWith('Panel file is missing:')) {
+        throw new TaskRejectedError(error.message, 'panel_file_missing');
+      }
+      if (error.message.startsWith('Project manifest project mismatch:')) {
+        throw new TaskRejectedError(error.message, 'project_manifest_mismatch');
+      }
+      if (error.message.startsWith('Shot storyboard directory is missing:')) {
+        throw new TaskRejectedError(error.message, 'storyboard_target_missing');
+      }
     }
     throw error;
   }

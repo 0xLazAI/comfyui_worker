@@ -6,7 +6,7 @@ import multer from 'multer';
 import { errorHandler } from './infra/errorHandler.js';
 import { currentRequestId } from './infra/logger.js';
 import { UnauthorizedError, ValidationError, NotFoundError } from './infra/HttpError.js';
-import { CONTRACT_VERSION, WORKER_NODE_TYPE, WORKER_TOKEN, WORKER_VERSION } from './infra/constants.js';
+import { CONTRACT_VERSION, PLATFORM_API_ENABLED, WORKER_NODE_TYPE, WORKER_TOKEN, WORKER_VERSION } from './infra/constants.js';
 import { WorkerRegistryPublisher } from './registry/WorkerRegistryPublisher.js';
 import { normalizeTaskDefinitionJson } from './taskDefinitions/definitionSchema.js';
 import { taskTypeDefinitionStore } from './taskDefinitions/taskTypeDefinitionStore.js';
@@ -116,7 +116,10 @@ export function createApp(): express.Express {
       version: WORKER_VERSION,
       contract_version: CONTRACT_VERSION,
       supported_tasks: supportedTasks,
-      can_write_project_files: true,
+      can_write_project_files: !PLATFORM_API_ENABLED,
+      can_write_pace_files: PLATFORM_API_ENABLED,
+      requires_project_mount: !PLATFORM_API_ENABLED,
+      supported_asset_kinds: PLATFORM_API_ENABLED ? ['renders', 'uploads', 'storyboard'] : ['renders', 'uploads'],
     });
   });
 
