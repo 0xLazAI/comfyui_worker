@@ -11,7 +11,7 @@
  *
  * The epilogue is wrapped in stable BEGIN/END markers so a local runner can
  * strip it back off and re-run the pristine agent script. The markers are a
- * cross-repo contract — the pai-blender-worker console mock strips by the same
+ * cross-repo contract — the pai-blender-console mock strips by the same
  * strings. Keep them in sync.
  */
 

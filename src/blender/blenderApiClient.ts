@@ -20,11 +20,11 @@
  * (PAI_BLENDER_ONLINE_BASE_URL).
  */
 import {
-  BLENDER_API_POLL_INTERVAL_SECONDS,
-  BLENDER_API_TIMEOUT_SECONDS,
   PAI_BLENDER_JOB_TIMEOUT_SECONDS,
   PAI_BLENDER_LOCAL_BASE_URL,
   PAI_BLENDER_ONLINE_BASE_URL,
+  PAI_BLENDER_POLL_INTERVAL_SECONDS,
+  PAI_BLENDER_POLL_TIMEOUT_SECONDS,
 } from '../infra/constants.js';
 import { ProviderRequestError, TaskRejectedError } from '../render/errors.js';
 import { appendExportEpilogue } from './exportEpilogue.js';
@@ -200,16 +200,16 @@ export async function pollBlenderRunUntilTerminal(
     }
 
     const elapsedMs = getNow()() - startedAt;
-    if (elapsedMs >= BLENDER_API_TIMEOUT_SECONDS * 1000) {
+    if (elapsedMs >= PAI_BLENDER_POLL_TIMEOUT_SECONDS * 1000) {
       throw new ProviderRequestError(
-        `PAILang job polling timed out after ${BLENDER_API_TIMEOUT_SECONDS} seconds`,
+        `PAILang job polling timed out after ${PAI_BLENDER_POLL_TIMEOUT_SECONDS} seconds`,
         504,
         'provider_poll_timeout',
         { run_id: jobId, status: status.status },
       );
     }
 
-    await getSleep()(BLENDER_API_POLL_INTERVAL_SECONDS * 1000);
+    await getSleep()(PAI_BLENDER_POLL_INTERVAL_SECONDS * 1000);
   }
 }
 

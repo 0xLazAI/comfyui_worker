@@ -22,8 +22,8 @@ afterEach(() => {
   delete process.env.PAI_BLENDER_ONLINE_BASE_URL;
   delete process.env.PAI_BLENDER_LOCAL_BASE_URL;
   delete process.env.PAI_BLENDER_JOB_TIMEOUT_SECONDS;
-  delete process.env.BLENDER_API_POLL_INTERVAL_SECONDS;
-  delete process.env.BLENDER_API_TIMEOUT_SECONDS;
+  delete process.env.PAI_BLENDER_POLL_INTERVAL_SECONDS;
+  delete process.env.PAI_BLENDER_POLL_TIMEOUT_SECONDS;
 });
 
 test('submitBlenderRun posts a script export job and maps job_id to run_id', async () => {
@@ -99,8 +99,8 @@ test('submitBlenderRun maps 5xx responses to ProviderRequestError', async () => 
 
 test('pollBlenderRunUntilTerminal maps done -> succeeded and synthesizes the glb artifact', async () => {
   process.env.PAI_BLENDER_ONLINE_BASE_URL = ONLINE_BASE_URL;
-  process.env.BLENDER_API_POLL_INTERVAL_SECONDS = '3';
-  process.env.BLENDER_API_TIMEOUT_SECONDS = '900';
+  process.env.PAI_BLENDER_POLL_INTERVAL_SECONDS = '3';
+  process.env.PAI_BLENDER_POLL_TIMEOUT_SECONDS = '900';
 
   const fetchMock = vi
     .fn()
@@ -149,8 +149,8 @@ test('pollBlenderRunUntilTerminal throws ProviderRequestError when the job fails
 
 test('pollBlenderRunUntilTerminal times out on non-terminal statuses without real waiting', async () => {
   process.env.PAI_BLENDER_ONLINE_BASE_URL = ONLINE_BASE_URL;
-  process.env.BLENDER_API_POLL_INTERVAL_SECONDS = '3';
-  process.env.BLENDER_API_TIMEOUT_SECONDS = '5';
+  process.env.PAI_BLENDER_POLL_INTERVAL_SECONDS = '3';
+  process.env.PAI_BLENDER_POLL_TIMEOUT_SECONDS = '5';
 
   const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ job_id: 'job_timeout', status: 'running' }));
   const sleep = vi.fn().mockResolvedValue(undefined);
