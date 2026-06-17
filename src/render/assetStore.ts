@@ -174,6 +174,13 @@ function detectExtension(filenameHint?: string, contentType?: string): string {
   if (normalizedType.includes('model/obj')) {
     return 'obj';
   }
+  // gltf checks must precede the json check below — `model/gltf+json` contains "json".
+  if (normalizedType.includes('gltf-binary')) {
+    return 'glb';
+  }
+  if (normalizedType.includes('gltf')) {
+    return 'gltf';
+  }
   if (normalizedType.includes('png')) {
     return 'png';
   }
@@ -200,6 +207,12 @@ function guessContentTypeFromFilename(filename: string): string {
   if (normalized.endsWith('.obj')) {
     return 'model/obj';
   }
+  if (normalized.endsWith('.glb')) {
+    return 'model/gltf-binary';
+  }
+  if (normalized.endsWith('.gltf')) {
+    return 'model/gltf+json';
+  }
   if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
     return 'image/jpeg';
   }
@@ -216,7 +229,7 @@ function guessContentTypeFromFilename(filename: string): string {
 }
 
 function isSupportedExtension(extension: string): boolean {
-  return ['blend', 'obj', 'png', 'jpg', 'webp', 'json', 'py'].includes(extension);
+  return ['blend', 'obj', 'glb', 'gltf', 'png', 'jpg', 'webp', 'json', 'py'].includes(extension);
 }
 
 function utcDateStamp(): string {

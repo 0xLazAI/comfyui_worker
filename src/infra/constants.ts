@@ -75,10 +75,19 @@ export const PROVIDER_POLL_INTERVAL_SECONDS = integer(
   1,
 );
 export const STEPHEN_RENDER_BASE_URL = pick(process.env.STEPHEN_RENDER_BASE_URL);
-export const BLENDER_API_BASE_URL = pick(process.env.BLENDER_API_BASE_URL);
-export const BLENDER_API_TOKEN = pick(process.env.BLENDER_API_TOKEN);
+// Online PAILang blender runner (defaults to the Stephen render host, port 8911).
+export const PAI_BLENDER_ONLINE_BASE_URL = pick(process.env.PAI_BLENDER_ONLINE_BASE_URL, process.env.STEPHEN_RENDER_BASE_URL);
+// Local PAILang-compatible blender runner — the pai-blender-worker console mock.
+// Used when a task's runner_target is `local`.
+export const PAI_BLENDER_LOCAL_BASE_URL = pick(process.env.PAI_BLENDER_LOCAL_BASE_URL, 'http://127.0.0.1:3002');
+// Per-job Blender wall-clock timeout sent to the runner. PAILang caps this at 600s.
+export const PAI_BLENDER_JOB_TIMEOUT_SECONDS = integer(pick(process.env.PAI_BLENDER_JOB_TIMEOUT_SECONDS, '600'), 600, 5);
+// Polling cadence/timeout against the PAILang job status endpoint.
 export const BLENDER_API_POLL_INTERVAL_SECONDS = integer(pick(process.env.BLENDER_API_POLL_INTERVAL_SECONDS, '3'), 3, 1);
 export const BLENDER_API_TIMEOUT_SECONDS = integer(pick(process.env.BLENDER_API_TIMEOUT_SECONDS, '900'), 900, 1);
+// Deprecated — pai-blender-api `/runs` contract is no longer used; kept for rollback only.
+export const BLENDER_API_BASE_URL = pick(process.env.BLENDER_API_BASE_URL);
+export const BLENDER_API_TOKEN = pick(process.env.BLENDER_API_TOKEN);
 export const PAI_ASSET_ENDPOINT = pick(process.env.PAI_ASSET_ENDPOINT);
 export const PAI_ASSET_BUCKET = pick(process.env.PAI_ASSET_BUCKET);
 export const PAI_ASSET_REGION = pick(process.env.PAI_ASSET_REGION, 'us-east-1');

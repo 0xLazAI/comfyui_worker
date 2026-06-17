@@ -115,6 +115,75 @@ const previewReviewOutputSchema = {
   type: 'object',
 } as const;
 
+// Stage 1 (analysis) output: a quantitative scene plan produced before any code.
+const scenePlanOutputSchema = {
+  additionalProperties: false,
+  properties: {
+    sceneType: {
+      description: 'What the scene is, e.g. "indoor basketball arena", "city street".',
+      type: 'string',
+    },
+    isStandardVenue: {
+      description:
+        'True when the main set is a regulation/standard venue (basketball/tennis court, football field, rink, ring, stage) that has canonical real-world dimensions.',
+      type: 'boolean',
+    },
+    venue: {
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string' },
+        canonicalDimensions: {
+          description: 'Real-world dimensions in metres, e.g. "28 x 15 m".',
+          type: 'string',
+        },
+        buildRules: {
+          description:
+            'Hard geometric constraints the 3D set MUST satisfy (centered at origin, axis-aligned, left-right & end-to-end symmetric, goals centered on baseline, markings coplanar, etc.).',
+          items: { type: 'string' },
+          type: 'array',
+        },
+        anchors: {
+          description: 'Named world-space anchors the subjects are placed against, e.g. "near_hoop", "center".',
+          items: { type: 'string' },
+          type: 'array',
+        },
+      },
+      required: ['name', 'canonicalDimensions', 'buildRules', 'anchors'],
+      type: 'object',
+    },
+    subjects: {
+      items: {
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string' },
+          role: { type: 'string' },
+          approxSize: { description: 'Approximate real-world size in metres.', type: 'string' },
+          placement: {
+            description: 'Position expressed relative to a named venue anchor — never as photo pixels.',
+            type: 'string',
+          },
+          action: { type: 'string' },
+        },
+        required: ['name', 'role', 'approxSize', 'placement', 'action'],
+        type: 'object',
+      },
+      type: 'array',
+    },
+    camera: {
+      additionalProperties: false,
+      properties: {
+        position: { type: 'string' },
+        lookAt: { type: 'string' },
+        focalMm: { type: 'number' },
+      },
+      required: ['position', 'lookAt', 'focalMm'],
+      type: 'object',
+    },
+  },
+  required: ['sceneType', 'isStandardVenue', 'venue', 'subjects', 'camera'],
+  type: 'object',
+} as const;
+
 export interface GeneratedBlenderScriptBody {
   notes: string[];
   referenceAnalysis?: ReferenceImageAnalysis | null;
@@ -135,7 +204,31 @@ export interface GeneratedBlenderScript extends GeneratedBlenderScriptBody {
   agentInstructionsPath?: string;
   provider: BlenderAgent;
   referenceAnalysis?: ReferenceImageAnalysis | null;
+  scenePlan?: ScenePlan | null;
   threadId?: string | null;
+}
+
+export interface ScenePlanVenue {
+  name: string;
+  canonicalDimensions: string;
+  buildRules: string[];
+  anchors: string[];
+}
+
+export interface ScenePlanSubject {
+  name: string;
+  role: string;
+  approxSize: string;
+  placement: string;
+  action: string;
+}
+
+export interface ScenePlan {
+  sceneType: string;
+  isStandardVenue: boolean;
+  venue: ScenePlanVenue;
+  subjects: ScenePlanSubject[];
+  camera: { position: string; lookAt: string; focalMm: number };
 }
 
 export interface GenerateBlenderScriptContext {
@@ -220,6 +313,34 @@ export function buildBlenderScriptPrompt(
   return buildBlenderScriptPromptWithMetadata(payload, context).text;
 }
 
+// Stage 1 prompt: analyze the image into a quantitative plan, no Blender Python yet.
+export function buildScenePlanPrompt(
+  payload: HydratedBlenderTaskPayload,
+  context: GenerateBlenderScriptContext,
+): string {
+  const referenceImagePath = context.sourceImagePath || 'not available';
+  const isUpdateWorkflow = payload.workflow.id === 'blender-update-3d';
+  return [
+    'You are planning a Blender previs scene for a comfyui-worker job.',
+    'This is the ANALYSIS step — do NOT write any Blender Python yet. Return only JSON conforming to the scene-plan schema.',
+    '',
+    'Analyze the source image (when provided) plus the PACE, then produce a quantitative plan:',
+    '- Classify the scene and set `isStandardVenue`: true when the main set is a regulation/standard venue (basketball/tennis court, football field, rink, ring, stage) with canonical real-world dimensions.',
+    '- `venue.canonicalDimensions`: the real-world size in metres of that venue type (recall the standard spec; do NOT measure it off the photo).',
+    '- `venue.buildRules`: the hard geometric constraints the 3D set MUST satisfy. For a standard venue ALWAYS include: "model the canonical venue, not the photo perspective"; "center the set at world origin"; "axis-aligned, no global tilt"; "left-right and end-to-end symmetric"; "goals/baskets/nets centered on their baseline (x=0)"; "all floor markings coplanar at one ground height".',
+    '- `venue.anchors`: named world positions the actors will be placed against (e.g. near_hoop, far_hoop, center, near_free_throw).',
+    '- `subjects[]`: for each player/ball/prop/crowd give role, approx real-world size in metres, `placement` expressed RELATIVE TO A NAMED ANCHOR (never photo pixels), and the action.',
+    '- `camera`: position, look-at, focal length. The photo determines ONLY the camera viewpoint and which side the action is on — it must NOT change the venue metric layout.',
+    '',
+    `Workflow: ${payload.workflow.id}`,
+    `Reference image path: ${referenceImagePath}`,
+    isUpdateWorkflow ? `Update prompt: ${payload.prompt || 'not provided'}` : `User prompt: ${payload.prompt || 'not provided'}`,
+    '',
+    'PACE JSON:',
+    JSON.stringify(payload.pace, null, 2),
+  ].join('\n');
+}
+
 function buildBlenderScriptPromptWithMetadata(
   payload: HydratedBlenderTaskPayload,
   context: GenerateBlenderScriptContext,
@@ -228,12 +349,14 @@ function buildBlenderScriptPromptWithMetadata(
   const modelId = payload.modelId || 'new model';
   const referenceImagePath = context.sourceImagePath || 'not available';
   const userPrompt = payload.prompt || 'not provided';
-  const updatePrompt = payload.workflow.id === 'blender-update-3d' ? userPrompt : 'not provided';
+  const isUpdateWorkflow = payload.workflow.id === 'blender-update-3d';
+  // create-3d and update-3d carry their direction in the same `prompt` field, so emit a single
+  // labelled line per workflow instead of repeating the value under two headings.
+  const promptLine = isUpdateWorkflow ? `Update prompt: ${userPrompt}` : `User prompt: ${userPrompt}`;
   const agentInstructions = loadBlenderAgentInstructions();
-  const taskText =
-    payload.workflow.id === 'blender-create-3d'
-      ? 'Create a new previs 3D scene from the provided source image and PACE.'
-      : `Update model "${modelId}" with the requested scene change.`;
+  const taskText = isUpdateWorkflow
+    ? `Update model "${modelId}" with the requested scene change.`
+    : 'Create a new previs 3D scene from the provided source image and PACE.';
 
   const text = [
     'You are generating Blender Python for a comfyui-worker Blender job.',
@@ -247,7 +370,17 @@ function buildBlenderScriptPromptWithMetadata(
     '- If no source image is available, fill `referenceAnalysis` with concise "not available" strings and empty arrays.',
     '- `blockingNotes` must be scene-specific and actionable for THIS reference image and PACE; never return generic advice that could apply to any image.',
     '- `script` must be one self-contained Blender Python script that follows the agent.md contract above.',
+    '- Structure the script in the Spatial Scaffolding order from agent.md:',
+    '    1. Scene container: create floor/walls/ceiling at their real-world metre dimensions (1 BU = 1 m) and anchor the environment to world origin.',
+    '    2. Object sizes: set every hero object\'s dimensions before assigning its location. Add a comment with the target size for each key mesh.',
+    '    3. Position anchors: derive every object\'s location as an explicit offset from a named scene anchor (e.g. "scene_centre", "floor_level") extracted from the reference image and PACE.',
+    '    4. Placement: place hero mesh first on the floor, then supporting actors and props, then background fill last. Verify no hero mesh floats or clips through the floor.',
     '- For create-3d, apply the user prompt as primary creative direction alongside the reference image and PACE.',
+    '',
+    'Follow the scene plan you produced in the previous message:',
+    '- Build the MAIN SET / venue FIRST, exactly per the plan\'s canonical dimensions and EVERY buildRule (centered at world origin, axis-aligned, symmetric, goals/baskets centered on their baseline, all floor markings coplanar at one ground height). Construct standard venues from their regulation dimensions.',
+    '- Do NOT bake the reference photo\'s 2D perspective into world coordinates — the photo informs only the camera. Place the camera to reproduce its viewpoint instead of shifting the set.',
+    '- Only after the set is built and self-consistent, place each subject from the plan using the venue anchors (never photo pixels).',
     '',
     'Human anatomy continuity guardrail:',
     '- If a human or humanoid actor is present, the torso, pelvis, head, arms, hands, legs, and feet must read as one continuous connected body.',
@@ -256,7 +389,8 @@ function buildBlenderScriptPromptWithMetadata(
     '- Prefer joined proxy meshes, overlapping cylinders/capsules, parented primitives, or simple joint spheres for characters so limbs cannot read as independent islands.',
     '',
     'Runtime facts:',
-    '- The runner injects these globals: PACE, TASK_ID, SCENE_ID, SHOT_ID, OUTPUT_DIR; prefer them with safe fallbacks.',
+    '- The runner injects these globals: TASK_ID, SCENE_ID, SHOT_ID, OUTPUT_DIR; prefer them with safe fallbacks.',
+    '- PACE is NOT available at runtime. Read all PACE values from the "PACE JSON" section below and hardcode them directly into the script.',
     '- Name the hero mesh with the Model id below.',
     '- Do not save or export files; the runner saves all artifacts.',
     '',
@@ -266,8 +400,7 @@ function buildBlenderScriptPromptWithMetadata(
     `Scene id: ${payload.sceneId}`,
     `Shot id: ${payload.shotId}`,
     `Model id: ${modelId}`,
-    `User prompt: ${userPrompt}`,
-    `Update prompt: ${updatePrompt}`,
+    promptLine,
     `Agent provider: ${payload.agent}`,
     `Runner target: ${payload.runnerTarget}`,
     `Source image asset URI: ${payload.inputs.sourceImageAssetUri || 'not available'}`,
@@ -334,6 +467,8 @@ function buildPreviewReviewPrompt(
     'Check at minimum:',
     '- Camera angle, framing, and composition match the reference and PACE intent.',
     '- Hero poses read from silhouette; the focus object is visible and explicit.',
+    '- Object-to-scene scale is plausible: human actors are ~1.75–1.9 m relative to the environment; props are correctly sized against actors; nothing is unrealistically giant or tiny.',
+    '- Hero meshes sit on the floor, not floating above it or clipping through it.',
     '- Human or humanoid actors have continuous connected torsos, pelvises, heads, arms, hands, legs, and feet; no floating, detached, or separated limbs.',
     '- The preview is bright enough to inspect; materials and colors do not collapse into one gray value.',
     '- No readable text labels; no occluders blocking the camera corridor.',
@@ -395,6 +530,52 @@ function parseJsonResponseText(text: string): unknown {
     ? trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '')
     : trimmed;
   return JSON.parse(jsonText) as unknown;
+}
+
+// Lenient on purpose: a slightly malformed plan must not crash the whole job —
+// missing fields fall back to neutral defaults and the script stage still runs.
+export function parseScenePlanResponse(text: string): ScenePlan {
+  let parsed: unknown;
+  try {
+    parsed = parseJsonResponseText(text);
+  } catch {
+    parsed = {};
+  }
+  const obj = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : {};
+  const venue = obj.venue && typeof obj.venue === 'object' ? (obj.venue as Record<string, unknown>) : {};
+  const camera = obj.camera && typeof obj.camera === 'object' ? (obj.camera as Record<string, unknown>) : {};
+  const str = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value : fallback);
+  const strArr = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+
+  return {
+    sceneType: str(obj.sceneType, 'unknown'),
+    isStandardVenue: obj.isStandardVenue === true,
+    venue: {
+      name: str(venue.name, 'main set'),
+      canonicalDimensions: str(venue.canonicalDimensions, 'not specified'),
+      buildRules: strArr(venue.buildRules),
+      anchors: strArr(venue.anchors),
+    },
+    subjects: Array.isArray(obj.subjects)
+      ? (obj.subjects as unknown[])
+          .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+          .map((item) => ({
+            name: str(item.name),
+            role: str(item.role),
+            approxSize: str(item.approxSize),
+            placement: str(item.placement),
+            action: str(item.action),
+          }))
+      : [],
+    camera: {
+      position: str(camera.position),
+      lookAt: str(camera.lookAt),
+      focalMm: typeof camera.focalMm === 'number' ? camera.focalMm : 35,
+    },
+  };
 }
 
 function validateReferenceImageAnalysisResponse(value: unknown): ReferenceImageAnalysis {
@@ -684,14 +865,20 @@ async function generateWithCodex(
   const codex = createCodexClient();
   const thread = codex.startThread(buildThreadOptions(context.workingDirectory));
 
-  const prompt = buildBlenderScriptPromptWithMetadata(payload, context, regenerationFailure);
-  const input: Input = context.sourceImagePath
+  // Turn 1 — analysis: image + PACE → quantitative scene plan (no code). The
+  // image is attached here and stays in thread context for the script turn.
+  const planInput: Input = context.sourceImagePath
     ? [
-        { text: prompt.text, type: 'text' },
+        { text: buildScenePlanPrompt(payload, context), type: 'text' },
         { path: context.sourceImagePath, type: 'local_image' },
       ]
-    : prompt.text;
-  const turn = await runCodexTurn(thread, input, {
+    : buildScenePlanPrompt(payload, context);
+  const planTurn = await runCodexTurn(thread, planInput, { outputSchema: scenePlanOutputSchema });
+  const scenePlan = parseScenePlanResponse(planTurn.finalResponse);
+
+  // Turn 2 — generation: build the set per the plan, then place subjects.
+  const prompt = buildBlenderScriptPromptWithMetadata(payload, context, regenerationFailure);
+  const turn = await runCodexTurn(thread, prompt.text, {
     outputSchema: generatedBlenderScriptOutputSchema,
   });
   let generated = parseGeneratedBlenderScriptResponse(turn.finalResponse);
@@ -702,6 +889,7 @@ async function generateWithCodex(
     agentInstructionsPath: prompt.agentInstructionsPath,
     provider: 'codex',
     referenceAnalysis: generated.referenceAnalysis ?? null,
+    scenePlan,
     threadId: thread.id,
   };
 }

@@ -13,19 +13,12 @@ import {
 import { writeStoryboardOutputSidecar } from '../render/storyboardOutputs.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
 import { readTaskDefinitionBinding } from '../taskDefinitions/definitionSchema.js';
+import { computeRetryDelaySeconds } from './retryDelay.js';
 import { taskStore } from './taskStore.js';
 import { isTerminalWorkerTaskStatus, utcNow } from './types.js';
 import { WORKER_NAME } from '../infra/constants.js';
 
 const RENDER_PANEL_CONSUMER_KEY = 'render_panel_consumer';
-
-function computeRetryDelaySeconds(backoffSeconds: number[], attemptNo: number): number {
-  if (!backoffSeconds.length) {
-    return 0;
-  }
-  const index = Math.max(0, attemptNo - 1);
-  return backoffSeconds[index] ?? backoffSeconds[backoffSeconds.length - 1] ?? 0;
-}
 
 export async function handleRenderPanelExecute(
   envelope: QueueJobEnvelope<{ taskId: string }>,

@@ -96,6 +96,56 @@ When modeling human or humanoid actors, pose separation must never become body-p
 - Prefer joined proxy meshes, overlapping cylinders/capsules, parented primitives, or simple joint spheres at shoulders, elbows, hips, and knees so limbs cannot read as independent islands.
 - If the source image hides a joint, use a plausible continuous proxy connection rather than leaving a visible gap.
 
+## Spatial Scaffolding — Scale Before Placement
+
+Build every scene in four ordered passes. Do not place objects before their size is derived, and do not derive sizes before the scene bounds are set.
+
+### Pass 1 — Scene Container (场景容器)
+
+Establish the real-world bounding volume of the environment first. Express all dimensions in Blender units (1 BU = 1 metre).
+
+- Read the reference image for environmental cues: floor span, ceiling height, wall-to-wall width, depth corridor, horizon line.
+- Create the floor plane and main structural shells (walls, ceiling, ground, road surface, arena boards) at their actual-scale dimensions before adding any actors or props.
+- Anchor the scene to the world origin: typically floor at Z = 0, scene centre at (0, 0, 0), depth running along –Y.
+- Examples of scene container sizes to derive from the reference:
+  - Indoor arena: ~60 m × 26 m floor, ~10 m ceiling
+  - Street/alley: width ~6–12 m, depth by composition
+  - Room interior: ~5–8 m × 4–6 m, ~2.5–3 m ceiling
+  - Outdoor open space: floor plane 50–200 m wide, horizon fill
+
+### Pass 2 — Object Sizes (物体尺寸)
+
+With the scene container built, derive and lock every object's real-world size before moving it.
+
+- Use a **scale anchor** from the scene: a known-size reference object pins the unit scale.
+  - Adult human figure: ~1.75–1.9 m tall (torso ~0.55 m, legs ~0.9 m, head ~0.23 m)
+  - Standard door: ~2.0 m × 0.9 m; car body: ~1.5 m tall × 4.5 m long
+  - Sports focus object: ball ~0.22–0.24 m dia; small disc/puck ~0.076 m dia × 0.025 m; scale to whatever the sport shows
+- Cross-check against the container: a human at 1.8 m in a 10 m ceiling arena reads correctly; a 5 m tall "player" is wrong.
+- Set `obj.dimensions` or use `bpy.ops.transform.resize` with an explicit scale before any location assignment. Never leave default cube/cylinder dimensions if the real object is a different size.
+- List every hero object with its target size in comments so violations are obvious on review.
+
+### Pass 3 — Position Anchors (位置锚点)
+
+Map positions to the scene container's landmarks, not to arbitrary coordinates.
+
+- Derive anchor points from the reference image:
+  - Scene centre (faceoff dot, stage centre, road centreline, table centre) → world (0, 0, 0) on the floor.
+  - Left/right boundary → ± half the scene width in X.
+  - Near/far boundary → near-camera edge in –Y, far background in +Y.
+- Express every object position as an offset from a named anchor: `centre + dx * X + dy * Y + dz * Z`.
+- Write the derivation in comments: `# player_blue: 0.8 m left of centre, on ice surface → (-0.8, 0.3, 0)`.
+- Keep hero actors within the inner third of the container by default; push background fill toward the edges.
+
+### Pass 4 — Placement (放置入场景)
+
+Place objects after sizes and positions are both resolved.
+
+- Place hero mesh first; verify it sits on the floor (Z offset = half its height from the floor plane).
+- Place supporting actors, props, and focus objects next, checking occlusion against the camera.
+- Place environment fill (crowd proxies, spectator bleachers, background structures) last.
+- Final sanity before closing: confirm the camera frustum contains the hero, focus object, and at least one depth-cue layer; no hero mesh should clip through the floor or float above it.
+
 ## Blender Implementation Guardrails
 
 - Target Blender 5.x compatibility.

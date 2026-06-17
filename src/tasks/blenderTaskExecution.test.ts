@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { ProviderRequestError, TaskRejectedError } from '../render/errors.js';
+import { ProviderRequestError } from '../render/errors.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
 import type { WorkerTaskAttemptInput, WorkerTaskEventInput, WorkerTaskRecord } from './types.js';
 
@@ -17,7 +17,6 @@ const downloadAssetMock = vi.fn();
 const uploadWorkerAssetMock = vi.fn();
 const generateBlenderScriptMock = vi.fn();
 const repairBlenderScriptMock = vi.fn();
-const reviewBlenderPreviewMock = vi.fn();
 const submitBlenderRunMock = vi.fn();
 const pollBlenderRunUntilTerminalMock = vi.fn();
 const downloadBlenderRunArtifactMock = vi.fn();
@@ -35,7 +34,6 @@ vi.mock('../render/assetStore.js', () => ({
 vi.mock('../blender/agent.js', () => ({
   generateBlenderScript: generateBlenderScriptMock,
   repairBlenderScript: repairBlenderScriptMock,
-  reviewBlenderPreview: reviewBlenderPreviewMock,
 }));
 
 vi.mock('../blender/blenderApiClient.js', () => ({
@@ -97,14 +95,26 @@ describe('blender task execution', () => {
     uploadWorkerAssetMock.mockReset();
     generateBlenderScriptMock.mockReset();
     repairBlenderScriptMock.mockReset();
-    reviewBlenderPreviewMock.mockReset();
     submitBlenderRunMock.mockReset();
     pollBlenderRunUntilTerminalMock.mockReset();
     downloadBlenderRunArtifactMock.mockReset();
     fetchBlenderRunLogsMock.mockReset();
     fetchBlenderRunLogsMock.mockResolvedValue([]);
-    reviewBlenderPreviewMock.mockResolvedValue(null);
-    process.env.BLENDER_PREVIEW_REVIEW_ROUNDS = '0';
+
+    // Default artifact wiring: PAILang yields a single GLB; uploads echo the
+    // filename hint back as an assets:// uri so assertions can key on filename.
+    downloadBlenderRunArtifactMock.mockResolvedValue({
+      buffer: Buffer.from('model-glb-binary'),
+      contentType: 'model/gltf-binary',
+      filename: 'model.glb',
+    });
+    uploadWorkerAssetMock.mockImplementation(async (_projectId: string, _group: string, input: { buffer: Buffer; contentType?: string; filenameHint?: string }) => ({
+      assetUri: `assets://blender/${input.filenameHint}`,
+      bytes: input.buffer.byteLength,
+      contentType: input.contentType,
+      filename: input.filenameHint,
+    }));
+
     taskStoreMock.get.mockClear();
     taskStoreMock.save.mockClear();
     taskStoreMock.appendEvent.mockClear();
@@ -117,13 +127,11 @@ describe('blender task execution', () => {
         rmSync(dirname(filePath), { recursive: true, force: true });
       }
     }
-    delete process.env.BLENDER_PREVIEW_REVIEW_ROUNDS;
-    delete process.env.BLENDER_PREVIEW_REVIEW_TIMEOUT_MS;
     delete process.env.BLENDER_SCRIPT_REPAIR_ATTEMPTS;
     vi.clearAllMocks();
   });
 
-  test('routes blender tasks through the registered consumer, stages source image for codex, and uploads the required artifact set', async () => {
+  test('routes blender tasks through the registered consumer, stages source image for codex, and uploads the glb + generated script', async () => {
     const envelope = createEnvelope(currentRecord.taskId);
     const context = createContext({ attempts: 1, maxAttempts: 3 });
     const sourceBuffer = Buffer.from('image-binary');
@@ -147,11 +155,7 @@ describe('blender task execution', () => {
         notes: ['created scene'],
         provider: 'codex',
         referenceAnalysis: {
-          blockingNotes: ['Keep slate labels outside hero silhouettes.'],
           cameraBrief: 'Low front camera centered on the puck.',
-          environment: ['indoor rink', 'boards'],
-          generationPrompt: 'Indoor hockey faceoff previs with referee and two players.',
-          primarySubjects: ['referee', 'blue player', 'red player', 'puck'],
           sceneBrief: 'Indoor hockey faceoff with central referee.',
         },
         script: 'import bpy\nbpy.data.objects\n',
@@ -162,33 +166,17 @@ describe('blender task execution', () => {
     submitBlenderRunMock.mockResolvedValue({
       run_id: 'run_123',
       status: 'queued',
-      status_url: '/runs/run_123',
+      status_url: '/api/blender/jobs/run_123',
     });
     pollBlenderRunUntilTerminalMock.mockImplementation(async (_submitted, onUpdate) => {
-      await onUpdate?.({
-        run_id: 'run_123',
-        status: 'running',
-      });
+      await onUpdate?.({ run_id: 'run_123', status: 'running' });
       return {
         run_id: 'run_123',
         status: 'succeeded',
         model_id: 'model_task_123',
-        artifacts: createProviderArtifacts(),
+        artifacts: [GLB_ARTIFACT],
       };
     });
-    for (const artifact of createProviderArtifacts()) {
-      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
-        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
-        contentType: String(artifact.content_type),
-        filename: String(artifact.filename),
-      });
-      uploadWorkerAssetMock.mockResolvedValueOnce({
-        assetUri: `assets://blender/${artifact.filename}`,
-        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
-        contentType: artifact.content_type,
-        filename: artifact.filename,
-      });
-    }
 
     const { handleTaskExecute, supportsConsumerKey } = await import('./taskExecution.js');
 
@@ -201,15 +189,6 @@ describe('blender task execution', () => {
       message: 'generating blender script',
     }));
     expect(appendedEvents.some((event) => event.eventType === 'started')).toBe(true);
-    expect(appendedEvents.find((event) => event.eventType === 'agent_generated')).toMatchObject({
-      detailJson: {
-        agentInstructionsPath: '/repo/agent.md',
-        referenceAnalysis: {
-          cameraBrief: 'Low front camera centered on the puck.',
-          sceneBrief: 'Indoor hockey faceoff with central referee.',
-        },
-      },
-    });
     expect(downloadAssetMock).toHaveBeenCalledWith('project_456', 'assets://uploads/source.png');
     expect(submitBlenderRunMock).toHaveBeenCalledWith(expect.objectContaining({
       task_id: 'task_123',
@@ -218,33 +197,28 @@ describe('blender task execution', () => {
       scene_id: 'scene_001',
       shot_id: 'shot_010',
       script: 'import bpy\nbpy.data.objects\n',
+      runner_target: 'gpu',
       reference_image: expect.objectContaining({
         base64: sourceBuffer.toString('base64'),
         content_type: 'image/png',
         filename: 'source.png',
       }),
     }));
-    expect(downloadBlenderRunArtifactMock).toHaveBeenCalledTimes(6);
+    // Only the GLB is fetched from the runner; generated_script is uploaded worker-side.
+    expect(downloadBlenderRunArtifactMock).toHaveBeenCalledTimes(1);
     expect(currentRecord.status).toBe('succeeded');
     expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
       workflow: 'blender-create-3d',
       model_id: 'model_task_123',
       run_id: 'run_123',
       runner_status: 'succeeded',
+      preview_reviews: [],
       artifacts: {
-        blend: 'assets://blender/scene.blend',
-        model_obj: 'assets://blender/model.obj',
-        preview: 'assets://blender/preview.png',
-        summary: 'assets://blender/summary.json',
-        pace: 'assets://blender/pace.json',
+        model_glb: 'assets://blender/model.glb',
         generated_script: 'assets://blender/generated_scene.py',
       },
       artifact_details: [
-        expect.objectContaining({ artifact_id: 'scene_blend', kind: 'blend', asset_uri: 'assets://blender/scene.blend' }),
-        expect.objectContaining({ artifact_id: 'model_obj', kind: 'model_obj', asset_uri: 'assets://blender/model.obj' }),
-        expect.objectContaining({ artifact_id: 'preview_png', kind: 'preview', asset_uri: 'assets://blender/preview.png' }),
-        expect.objectContaining({ artifact_id: 'summary_json', kind: 'summary', asset_uri: 'assets://blender/summary.json' }),
-        expect.objectContaining({ artifact_id: 'pace_json', kind: 'pace', asset_uri: 'assets://blender/pace.json' }),
+        expect.objectContaining({ artifact_id: 'model_glb', kind: 'model_glb', asset_uri: 'assets://blender/model.glb' }),
         expect.objectContaining({ artifact_id: 'generated_scene_py', kind: 'generated_script', asset_uri: 'assets://blender/generated_scene.py' }),
       ],
     }));
@@ -256,7 +230,7 @@ describe('blender task execution', () => {
     expect(existsSync(stagedPath)).toBe(false);
   });
 
-  test('passes a staged optional source image to update workflow codex generation and provider submission', async () => {
+  test('passes runner_target=local and the staged optional image to update workflow submission', async () => {
     currentRecord = createTaskRecord({
       requestPayload: {
         workflow: 'blender-update-3d',
@@ -264,6 +238,7 @@ describe('blender task execution', () => {
         shot_id: 'shot_010',
         model_id: 'model_existing',
         prompt: 'Add a canopy and soften the light',
+        runner_target: 'local',
         inputs: {
           image: {
             assetUri: 'assets://uploads/update-source.jpg',
@@ -297,44 +272,32 @@ describe('blender task execution', () => {
     submitBlenderRunMock.mockResolvedValue({
       run_id: 'run_update',
       status: 'queued',
-      status_url: '/runs/run_update',
+      status_url: '/api/blender/jobs/run_update',
     });
     pollBlenderRunUntilTerminalMock.mockResolvedValue({
       run_id: 'run_update',
       status: 'succeeded',
       model_id: 'model_existing',
-      artifacts: createProviderArtifacts(),
+      artifacts: [GLB_ARTIFACT],
     });
-    for (const artifact of createProviderArtifacts()) {
-      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
-        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
-        contentType: String(artifact.content_type),
-        filename: String(artifact.filename),
-      });
-      uploadWorkerAssetMock.mockResolvedValueOnce({
-        assetUri: `assets://blender/${artifact.filename}`,
-        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
-        contentType: artifact.content_type,
-        filename: artifact.filename,
-      });
-    }
 
     const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
     await handleBlenderExecute(envelope, context);
 
     expect(submitBlenderRunMock).toHaveBeenCalledWith(expect.objectContaining({
+      runner_target: 'local',
       reference_image: expect.objectContaining({
         content_type: 'image/jpeg',
         filename: 'update-source.jpg',
       }),
     }));
-    expect(submitBlenderRunMock.mock.calls[0][0]).not.toHaveProperty('model_id');
+    expect(submitBlenderRunMock.mock.calls[0][0]).toMatchObject({ model_id: 'model_existing' });
     expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
       model_id: 'model_existing',
     }));
   });
 
-  test('accepts provider artifacts when semantic kind must be inferred from filename only', async () => {
+  test('accepts the glb artifact when its kind must be inferred from filename only', async () => {
     const envelope = createEnvelope(currentRecord.taskId);
     const context = createContext({ attempts: 1, maxAttempts: 3 });
 
@@ -342,26 +305,13 @@ describe('blender task execution', () => {
     submitBlenderRunMock.mockResolvedValue({
       run_id: 'run_filename_only',
       status: 'queued',
-      status_url: '/runs/run_filename_only',
+      status_url: '/api/blender/jobs/run_filename_only',
     });
     pollBlenderRunUntilTerminalMock.mockResolvedValue({
       run_id: 'run_filename_only',
       status: 'succeeded',
-      artifacts: createFilenameOnlyProviderArtifacts(),
+      artifacts: [{ artifact_id: 'artifact_002', filename: 'model.glb', content_type: 'model/gltf-binary' }],
     });
-    for (const artifact of createFilenameOnlyProviderArtifacts()) {
-      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
-        buffer: Buffer.from(`${artifact.filename}-binary`),
-        contentType: String(artifact.content_type),
-        filename: String(artifact.filename),
-      });
-      uploadWorkerAssetMock.mockResolvedValueOnce({
-        assetUri: `assets://blender/${artifact.filename}`,
-        bytes: Buffer.byteLength(`${artifact.filename}-binary`),
-        contentType: artifact.content_type,
-        filename: artifact.filename,
-      });
-    }
 
     const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
     await handleBlenderExecute(envelope, context);
@@ -369,17 +319,13 @@ describe('blender task execution', () => {
     expect(currentRecord.status).toBe('succeeded');
     expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
       artifacts: {
-        blend: 'assets://blender/scene.blend',
-        model_obj: 'assets://blender/model.obj',
-        preview: 'assets://blender/preview.png',
-        summary: 'assets://blender/summary.json',
-        pace: 'assets://blender/pace.json',
+        model_glb: 'assets://blender/model.glb',
         generated_script: 'assets://blender/generated_scene.py',
       },
     }));
   });
 
-  test('marks terminal success with missing artifacts as failed and rethrows', async () => {
+  test('marks terminal success with no glb artifact as failed and rethrows', async () => {
     const envelope = createEnvelope(currentRecord.taskId);
     const context = createContext({ attempts: 3, maxAttempts: 3 });
 
@@ -387,7 +333,7 @@ describe('blender task execution', () => {
     submitBlenderRunMock.mockResolvedValue({
       run_id: 'run_missing',
       status: 'queued',
-      status_url: '/runs/run_missing',
+      status_url: '/api/blender/jobs/run_missing',
     });
     pollBlenderRunUntilTerminalMock.mockResolvedValue({
       run_id: 'run_missing',
@@ -406,7 +352,7 @@ describe('blender task execution', () => {
     expect(savedAttempts.at(-1)).toEqual(expect.objectContaining({ status: 'failed' }));
   });
 
-  test('marks terminal success with an empty artifact download as failed and rethrows', async () => {
+  test('marks terminal success with an empty glb download as failed and rethrows', async () => {
     const envelope = createEnvelope(currentRecord.taskId);
     const context = createContext({ attempts: 3, maxAttempts: 3 });
 
@@ -414,17 +360,17 @@ describe('blender task execution', () => {
     submitBlenderRunMock.mockResolvedValue({
       run_id: 'run_empty',
       status: 'queued',
-      status_url: '/runs/run_empty',
+      status_url: '/api/blender/jobs/run_empty',
     });
     pollBlenderRunUntilTerminalMock.mockResolvedValue({
       run_id: 'run_empty',
       status: 'succeeded',
-      artifacts: createProviderArtifacts(),
+      artifacts: [GLB_ARTIFACT],
     });
-    downloadBlenderRunArtifactMock.mockResolvedValueOnce({
+    downloadBlenderRunArtifactMock.mockResolvedValue({
       buffer: Buffer.alloc(0),
-      contentType: 'application/x-blender',
-      filename: 'scene.blend',
+      contentType: 'model/gltf-binary',
+      filename: 'model.glb',
     });
 
     const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
@@ -446,7 +392,7 @@ describe('blender task execution', () => {
     submitBlenderRunMock.mockResolvedValue({
       run_id: 'run_retry',
       status: 'queued',
-      status_url: '/runs/run_retry',
+      status_url: '/api/blender/jobs/run_retry',
     });
     pollBlenderRunUntilTerminalMock.mockRejectedValue(
       new ProviderRequestError('provider unavailable', 503, 'provider_status_failed'),
@@ -480,16 +426,16 @@ describe('blender task execution', () => {
 
     arrangeScriptGenerationWithSourceImage();
     submitBlenderRunMock
-      .mockResolvedValueOnce({ run_id: 'run_fail_1', status: 'queued', status_url: '/runs/run_fail_1' })
-      .mockResolvedValueOnce({ run_id: 'run_ok_2', status: 'queued', status_url: '/runs/run_ok_2' });
+      .mockResolvedValueOnce({ run_id: 'run_fail_1', status: 'queued', status_url: '/api/blender/jobs/run_fail_1' })
+      .mockResolvedValueOnce({ run_id: 'run_ok_2', status: 'queued', status_url: '/api/blender/jobs/run_ok_2' });
     pollBlenderRunUntilTerminalMock
       .mockRejectedValueOnce(
-        new ProviderRequestError('Blender API run failed', 502, 'provider_run_failed', { run_id: 'run_fail_1' }),
+        new ProviderRequestError('PAILang export job failed', 502, 'provider_run_failed', { run_id: 'run_fail_1' }),
       )
       .mockResolvedValueOnce({
         run_id: 'run_ok_2',
         status: 'succeeded',
-        artifacts: createProviderArtifacts(),
+        artifacts: [GLB_ARTIFACT],
       });
     fetchBlenderRunLogsMock.mockResolvedValue([
       { stream: 'stderr', message: "NameError: name 'boom' is not defined" },
@@ -501,19 +447,6 @@ describe('blender task execution', () => {
       summary: 'Repaired the previs scene.',
       threadId: 'thread_123',
     });
-    for (const artifact of createProviderArtifacts()) {
-      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
-        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
-        contentType: String(artifact.content_type),
-        filename: String(artifact.filename),
-      });
-      uploadWorkerAssetMock.mockResolvedValueOnce({
-        assetUri: `assets://blender/${artifact.filename}`,
-        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
-        contentType: artifact.content_type,
-        filename: artifact.filename,
-      });
-    }
 
     const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
     await handleBlenderExecute(envelope, context);
@@ -521,10 +454,9 @@ describe('blender task execution', () => {
     expect(repairBlenderScriptMock).toHaveBeenCalledTimes(1);
     const [, , , failure] = repairBlenderScriptMock.mock.calls[0];
     expect(failure).toMatchObject({
-      errorMessage: 'Blender API run failed',
+      errorMessage: 'PAILang export job failed',
       runId: 'run_fail_1',
     });
-    expect(failure.logsTail).toEqual(["stderr: NameError: name 'boom' is not defined"]);
     expect(submitBlenderRunMock).toHaveBeenCalledTimes(2);
     expect(submitBlenderRunMock.mock.calls[1][0]).toMatchObject({
       script: 'import bpy\nfixed_scene()\n',
@@ -535,126 +467,6 @@ describe('blender task execution', () => {
     expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
       run_id: 'run_ok_2',
       script_repair_attempts: 1,
-    }));
-  });
-
-  test('re-renders a corrected script when the preview review is not approved', async () => {
-    process.env.BLENDER_PREVIEW_REVIEW_ROUNDS = '1';
-    const envelope = createEnvelope(currentRecord.taskId);
-    const context = createContext({ attempts: 1, maxAttempts: 3 });
-
-    arrangeScriptGenerationWithSourceImage();
-    submitBlenderRunMock
-      .mockResolvedValueOnce({ run_id: 'run_first', status: 'queued', status_url: '/runs/run_first' })
-      .mockResolvedValueOnce({ run_id: 'run_fixed', status: 'queued', status_url: '/runs/run_fixed' });
-    pollBlenderRunUntilTerminalMock
-      .mockResolvedValueOnce({
-        run_id: 'run_first',
-        status: 'succeeded',
-        artifacts: createProviderArtifacts(),
-      })
-      .mockResolvedValueOnce({
-        run_id: 'run_fixed',
-        status: 'succeeded',
-        artifacts: createProviderArtifacts(),
-      });
-    reviewBlenderPreviewMock.mockResolvedValue({
-      approved: false,
-      issues: ['Preview is too dark to inspect.'],
-      script: 'import bpy\nbrighter_scene()\n',
-    });
-    downloadBlenderRunArtifactMock.mockResolvedValueOnce({
-      buffer: Buffer.from('preview-binary'),
-      contentType: 'image/png',
-      filename: 'preview.png',
-    });
-    for (const artifact of createProviderArtifacts()) {
-      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
-        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
-        contentType: String(artifact.content_type),
-        filename: String(artifact.filename),
-      });
-      uploadWorkerAssetMock.mockResolvedValueOnce({
-        assetUri: `assets://blender/${artifact.filename}`,
-        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
-        contentType: artifact.content_type,
-        filename: artifact.filename,
-      });
-    }
-
-    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
-    await handleBlenderExecute(envelope, context);
-
-    expect(reviewBlenderPreviewMock).toHaveBeenCalledTimes(1);
-    expect(submitBlenderRunMock).toHaveBeenCalledTimes(2);
-    expect(submitBlenderRunMock.mock.calls[1][0]).toMatchObject({
-      script: 'import bpy\nbrighter_scene()\n',
-    });
-    expect(appendedEvents.some((event) => event.eventType === 'preview_reviewed')).toBe(true);
-    expect(appendedEvents.some((event) => event.eventType === 'preview_fix_applied')).toBe(true);
-    expect(currentRecord.status).toBe('succeeded');
-    expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
-      run_id: 'run_fixed',
-      preview_reviews: [
-        { round: 1, approved: false, issues: ['Preview is too dark to inspect.'] },
-      ],
-    }));
-  });
-
-  test('passes a bounded preview review timeout and keeps successful runner output when review times out', async () => {
-    process.env.BLENDER_PREVIEW_REVIEW_ROUNDS = '1';
-    process.env.BLENDER_PREVIEW_REVIEW_TIMEOUT_MS = '1234';
-    const envelope = createEnvelope(currentRecord.taskId);
-    const context = createContext({ attempts: 1, maxAttempts: 3 });
-
-    arrangeScriptGenerationWithSourceImage();
-    submitBlenderRunMock.mockResolvedValue({
-      run_id: 'run_first',
-      status: 'queued',
-      status_url: '/runs/run_first',
-    });
-    pollBlenderRunUntilTerminalMock.mockResolvedValue({
-      run_id: 'run_first',
-      status: 'succeeded',
-      artifacts: createProviderArtifacts(),
-    });
-    reviewBlenderPreviewMock.mockRejectedValue(
-      new Error('Codex turn timed out after 1234ms and was aborted to release the codex process.'),
-    );
-    downloadBlenderRunArtifactMock.mockResolvedValueOnce({
-      buffer: Buffer.from('preview-binary'),
-      contentType: 'image/png',
-      filename: 'preview.png',
-    });
-    for (const artifact of createProviderArtifacts()) {
-      downloadBlenderRunArtifactMock.mockResolvedValueOnce({
-        buffer: Buffer.from(`${artifact.artifact_id}-binary`),
-        contentType: String(artifact.content_type),
-        filename: String(artifact.filename),
-      });
-      uploadWorkerAssetMock.mockResolvedValueOnce({
-        assetUri: `assets://blender/${artifact.filename}`,
-        bytes: Buffer.byteLength(`${artifact.artifact_id}-binary`),
-        contentType: artifact.content_type,
-        filename: artifact.filename,
-      });
-    }
-
-    const { handleBlenderExecute } = await import('./blenderTaskExecution.js');
-    await handleBlenderExecute(envelope, context);
-
-    expect(reviewBlenderPreviewMock).toHaveBeenCalledTimes(1);
-    expect(reviewBlenderPreviewMock.mock.calls[0][4]).toEqual({ turnTimeoutMs: 1234 });
-    expect(appendedEvents.find((event) => event.eventType === 'preview_review_skipped')).toMatchObject({
-      detailJson: {
-        error: expect.stringContaining('timed out after 1234ms'),
-        round: 1,
-      },
-    });
-    expect(currentRecord.status).toBe('succeeded');
-    expect(currentRecord.resultPayload).toEqual(expect.objectContaining({
-      run_id: 'run_first',
-      preview_reviews: [],
     }));
   });
 
@@ -675,6 +487,8 @@ describe('blender task execution', () => {
   });
 });
 
+const GLB_ARTIFACT = { artifact_id: 'model_glb', filename: 'model.glb', content_type: 'model/gltf-binary' };
+
 function arrangeScriptGenerationWithSourceImage(): void {
   const sourceBuffer = Buffer.from('image-binary');
   downloadAssetMock.mockResolvedValue({
@@ -690,28 +504,6 @@ function arrangeScriptGenerationWithSourceImage(): void {
     summary: 'Generated a previs scene.',
     threadId: 'thread_123',
   });
-}
-
-function createProviderArtifacts() {
-  return [
-    { artifact_id: 'scene_blend', filename: 'scene.blend', content_type: 'application/x-blender' },
-    { artifact_id: 'model_obj', filename: 'model.obj', content_type: 'model/obj' },
-    { artifact_id: 'preview_png', filename: 'preview.png', content_type: 'image/png' },
-    { artifact_id: 'summary_json', filename: 'summary.json', content_type: 'application/json' },
-    { artifact_id: 'pace_json', filename: 'pace.json', content_type: 'application/json' },
-    { artifact_id: 'generated_scene_py', filename: 'generated_scene.py', content_type: 'text/x-python' },
-  ];
-}
-
-function createFilenameOnlyProviderArtifacts() {
-  return [
-    { artifact_id: 'artifact_001', filename: 'scene.blend', content_type: 'application/x-blender' },
-    { artifact_id: 'artifact_002', filename: 'model.obj', content_type: 'model/obj' },
-    { artifact_id: 'artifact_003', filename: 'preview.png', content_type: 'image/png' },
-    { artifact_id: 'artifact_004', filename: 'summary.json', content_type: 'application/json' },
-    { artifact_id: 'artifact_005', filename: 'pace.json', content_type: 'application/json' },
-    { artifact_id: 'artifact_006', filename: 'generated_scene.py', content_type: 'text/x-python' },
-  ];
 }
 
 function createEnvelope(taskId: string): QueueJobEnvelope<{ taskId: string }> {

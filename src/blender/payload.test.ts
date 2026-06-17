@@ -245,7 +245,7 @@ test('hydrateBlenderTaskPayload forces scene identifiers inside pace for update 
       shot_id: 'shot_override',
       model_id: 'model_abc',
       prompt: 'Swap the wall material to brushed metal.',
-      agent: 'claude',
+      agent: 'codex',
       runner_target: 'local',
       pace: {
         schema_version: 'pace-2',
@@ -259,13 +259,29 @@ test('hydrateBlenderTaskPayload forces scene identifiers inside pace for update 
     CONTEXT,
   );
 
-  expect(normalized.agent).toBe('claude');
+  expect(normalized.agent).toBe('codex');
   expect(normalized.runnerTarget).toBe('local');
   expect(normalized.pace.scene).toMatchObject({
     scene_id: 'scene_override',
     shot_id: 'shot_override',
     variation: 'night',
   });
+});
+
+test('hydrateBlenderTaskPayload rejects the unimplemented claude agent at validation', () => {
+  expect(() =>
+    hydrateBlenderTaskPayload(
+      {
+        workflow: 'blender-update-3d',
+        scene_id: 'scene_001',
+        shot_id: 'shot_010',
+        model_id: 'model_abc',
+        prompt: 'Swap the wall material to brushed metal.',
+        agent: 'claude',
+      },
+      CONTEXT,
+    ),
+  ).toThrow('payload.agent must be one of: codex');
 });
 
 test('hydrateBlenderTaskPayload deep-merges known pace sections for partial overrides', () => {

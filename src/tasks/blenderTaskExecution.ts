@@ -5,17 +5,14 @@ import os from 'os';
 import {
   generateBlenderScript,
   repairBlenderScript,
-  reviewBlenderPreview,
   type BlenderScriptFailure,
   type GeneratedBlenderScript,
   type GenerateBlenderScriptContext,
 } from '../blender/agent.js';
 import {
-  downloadBlenderRunArtifact,
   fetchBlenderRunLogs,
   pollBlenderRunUntilTerminal,
   submitBlenderRun,
-  type BlenderApiArtifactMetadata,
   type BlenderApiRunStatus,
   type BlenderApiRunSubmitted,
 } from '../blender/blenderApiClient.js';
@@ -25,15 +22,14 @@ import { downloadAsset } from '../render/assetStore.js';
 import { ProviderRequestError, TaskRejectedError } from '../render/errors.js';
 import { hydrateBlenderTaskPayload } from '../blender/payload.js';
 import type { HydratedBlenderTaskPayload } from '../blender/types.js';
-import { buildArtifactUriMap, findPreviewArtifact, uploadArtifacts } from './blenderArtifacts.js';
+import { buildArtifactUriMap, uploadArtifacts, uploadGeneratedScriptArtifact } from './blenderArtifacts.js';
+import { computeRetryDelaySeconds } from './retryDelay.js';
 import { taskStore } from './taskStore.js';
 import { isTerminalWorkerTaskStatus, utcNow } from './types.js';
 
 export const BLENDER_CONSUMER_KEY = 'blender_consumer';
 
 const DEFAULT_SCRIPT_REPAIR_ATTEMPTS = 2;
-const DEFAULT_PREVIEW_REVIEW_ROUNDS = 1;
-const DEFAULT_PREVIEW_REVIEW_TIMEOUT_MS = 2 * 60 * 1000;
 const RUN_LOG_TAIL_LIMIT = 40;
 
 interface BlenderRunSession {
@@ -49,10 +45,6 @@ interface BlenderRunOutcome {
   repairAttempts: number;
   script: GeneratedBlenderScript;
   terminalStatus: BlenderApiRunStatus;
-}
-
-interface ReviewedRunOutcome extends BlenderRunOutcome {
-  reviewVerdicts: Array<Record<string, unknown>>;
 }
 
 export async function handleBlenderExecute(
@@ -156,19 +148,22 @@ export async function handleBlenderExecute(
       });
 
       const runOutcome = await executeRunWithRepair(session, generatedScript, agentContext);
-      const reviewed = await reviewPreviewAndMaybeRerun(session, runOutcome, agentContext);
-      const terminalStatus = reviewed.terminalStatus;
+      const terminalStatus = runOutcome.terminalStatus;
 
       await saveRunningState(session, 75, 'uploading blender artifacts');
 
       const artifactDetails = await uploadArtifacts(taskId, payload.projectId, terminalStatus, context.attempts, workerName);
+      // PAILang returns only the GLB; upload the pristine agent script worker-side.
+      artifactDetails.push(
+        await uploadGeneratedScriptArtifact(taskId, payload.projectId, runOutcome.script.script, context.attempts, workerName),
+      );
       const result = {
         workflow: payload.workflow.id,
         model_id: session.modelId,
         run_id: terminalStatus.run_id,
         runner_status: terminalStatus.status,
-        script_repair_attempts: reviewed.repairAttempts,
-        preview_reviews: reviewed.reviewVerdicts,
+        script_repair_attempts: runOutcome.repairAttempts,
+        preview_reviews: [],
         artifacts: buildArtifactUriMap(artifactDetails),
         artifact_details: artifactDetails,
       };
@@ -386,115 +381,20 @@ async function executeRunWithRepair(
   }
 }
 
-async function reviewPreviewAndMaybeRerun(
-  session: BlenderRunSession,
-  outcome: BlenderRunOutcome,
-  agentContext: GenerateBlenderScriptContext,
-): Promise<ReviewedRunOutcome> {
-  const reviewRounds = readNonNegativeIntEnv(
-    'BLENDER_PREVIEW_REVIEW_ROUNDS',
-    DEFAULT_PREVIEW_REVIEW_ROUNDS,
-  );
-  const reviewTimeoutMs = readPositiveIntEnv(
-    'BLENDER_PREVIEW_REVIEW_TIMEOUT_MS',
-    DEFAULT_PREVIEW_REVIEW_TIMEOUT_MS,
-  );
-  let current = outcome;
-  const reviewVerdicts: Array<Record<string, unknown>> = [];
-
-  for (let round = 1; round <= reviewRounds; round += 1) {
-    const previewArtifact = findPreviewArtifact(current.terminalStatus);
-    if (!previewArtifact) {
-      break;
-    }
-
-    let review;
-    try {
-      await saveRunningState(session, 72, 'reviewing preview render');
-      review = await withDownloadedPreview(
-        current.terminalStatus.run_id,
-        previewArtifact,
-        (previewPath) => reviewBlenderPreview(
-          current.script,
-          session.payload,
-          agentContext,
-          previewPath,
-          { turnTimeoutMs: reviewTimeoutMs },
-        ),
-      );
-    } catch (error: any) {
-      await taskStore.appendEvent({
-        taskId: session.taskId,
-        eventType: 'preview_review_skipped',
-        attemptNo: session.attemptNo,
-        workerName: session.workerName,
-        message: 'preview review failed; keeping current run result',
-        detailJson: { round, error: String(error?.message || error) },
-      });
-      break;
-    }
-
-    if (!review) {
-      break;
-    }
-
-    reviewVerdicts.push({ round, approved: review.approved, issues: review.issues });
-    await taskStore.appendEvent({
-      taskId: session.taskId,
-      eventType: 'preview_reviewed',
-      attemptNo: session.attemptNo,
-      workerName: session.workerName,
-      message: review.approved
-        ? 'preview review approved the render'
-        : `preview review found ${review.issues.length} issue(s)`,
-      detailJson: { round, approved: review.approved, issues: review.issues },
-    });
-
-    if (review.approved || !review.script) {
-      break;
-    }
-
-    try {
-      const updatedScript: GeneratedBlenderScript = { ...current.script, script: review.script };
-      const submitted = await submitRun(session, updatedScript);
-      const terminalStatus = await pollRunUntilTerminal(session, submitted);
-      current = { repairAttempts: current.repairAttempts, script: updatedScript, terminalStatus };
-      await taskStore.appendEvent({
-        taskId: session.taskId,
-        eventType: 'preview_fix_applied',
-        attemptNo: session.attemptNo,
-        workerName: session.workerName,
-        message: 'corrected script re-rendered after preview review',
-        detailJson: { round, runId: terminalStatus.run_id },
-      });
-    } catch (error: any) {
-      await taskStore.appendEvent({
-        taskId: session.taskId,
-        eventType: 'preview_fix_skipped',
-        attemptNo: session.attemptNo,
-        workerName: session.workerName,
-        message: 'corrected script re-run failed; keeping previous successful run',
-        detailJson: { round, error: String(error?.message || error) },
-      });
-      break;
-    }
-  }
-
-  return { ...current, reviewVerdicts };
-}
-
 async function submitRun(
   session: BlenderRunSession,
   script: GeneratedBlenderScript,
 ): Promise<BlenderApiRunSubmitted> {
+  const isUpdateWorkflow = session.payload.workflow.id === 'blender-update-3d';
   const submitted = await submitBlenderRun({
     task_id: session.payload.taskId,
     workflow: session.payload.workflow.id,
     project_id: session.payload.projectId,
     scene_id: session.payload.sceneId,
     shot_id: session.payload.shotId,
-    pace: session.payload.pace,
+    ...(isUpdateWorkflow && session.payload.modelId ? { model_id: session.payload.modelId } : {}),
     script: script.script,
+    runner_target: session.payload.runnerTarget,
     ...(session.referenceImage ? { reference_image: session.referenceImage } : {}),
   });
 
@@ -583,22 +483,6 @@ async function buildScriptFailure(
   };
 }
 
-async function withDownloadedPreview<T>(
-  runId: string,
-  artifact: Pick<BlenderApiArtifactMetadata, 'artifact_id' | 'filename' | 'content_type'>,
-  callback: (previewPath: string) => Promise<T>,
-): Promise<T> {
-  const downloaded = await downloadBlenderRunArtifact(runId, artifact);
-  const tempDirectory = await mkdtemp(join(tmpdir(), 'comfyui-blender-preview-'));
-  try {
-    const previewPath = join(tempDirectory, 'preview.png');
-    await writeFile(previewPath, downloaded.buffer);
-    return await callback(previewPath);
-  } finally {
-    await rm(tempDirectory, { recursive: true, force: true }).catch(() => undefined);
-  }
-}
-
 function readNonNegativeIntEnv(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) {
@@ -606,18 +490,6 @@ function readNonNegativeIntEnv(name: string, fallback: number): number {
   }
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
-    return fallback;
-  }
-  return parsed;
-}
-
-function readPositiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) {
-    return fallback;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
     return fallback;
   }
   return parsed;
@@ -685,14 +557,6 @@ async function expectTask(taskId: string) {
     throw new Error(`Task not found: ${taskId}`);
   }
   return record;
-}
-
-function computeRetryDelaySeconds(backoffSeconds: number[], attemptNo: number): number {
-  if (!backoffSeconds.length) {
-    return 0;
-  }
-  const index = Math.max(0, attemptNo - 1);
-  return backoffSeconds[index] ?? backoffSeconds[backoffSeconds.length - 1] ?? 0;
 }
 
 function progressForProviderStatus(status: string): number {

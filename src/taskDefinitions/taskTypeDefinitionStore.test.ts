@@ -21,76 +21,37 @@ describe('TaskTypeDefinitionStore.ensureReady', () => {
     initializeDatabaseMock.mockResolvedValue(null);
   });
 
+  // ensureBuiltInDefinition now uses a single atomic INSERT ... ON CONFLICT (worker_name, task_type, version) DO NOTHING
+  // instead of the old check-then-insert pattern. Uniqueness is enforced by the DB; no transaction needed.
+
   describe('render_panel built-in seed', () => {
-    test('skips create when an enabled render_panel definition already exists', async () => {
-      const database = createDatabaseHarness({
-        enabledTaskTypes: ['render_panel', 'blender'],
-      });
+    test('upserts with ON CONFLICT DO NOTHING regardless of existing state', async () => {
+      const database = createDatabaseHarness();
       getDatabasePoolMock.mockResolvedValue(database.pool);
 
       const store = new TaskTypeDefinitionStore();
-      const createSpy = vi.spyOn(store, 'create').mockResolvedValue(createRecord('render_panel'));
-
       await store.ensureReady();
 
-      expect(createSpy).not.toHaveBeenCalled();
+      // Two ON CONFLICT INSERTs: one per built-in definition. No transaction (no connect).
       expect(database.connectMock).not.toHaveBeenCalled();
+      expect(database.poolQueryMock).toHaveBeenCalledTimes(2);
+      expect(String(database.poolQueryMock.mock.calls[0]?.[0])).toContain('ON CONFLICT (worker_name, task_type, version) DO NOTHING');
     });
 
-    test('skips create when any render_panel version already exists', async () => {
-      const database = createDatabaseHarness({
-        enabledTaskTypes: ['blender'],
-        countsByTaskType: { render_panel: 1 },
-      });
+    test('inserts render_panel definition with correct params', async () => {
+      const database = createDatabaseHarness();
       getDatabasePoolMock.mockResolvedValue(database.pool);
 
-      const store = new TaskTypeDefinitionStore();
-      const createSpy = vi.spyOn(store, 'create').mockResolvedValue(createRecord('render_panel'));
-
-      await store.ensureReady();
-
-      expect(createSpy).not.toHaveBeenCalledWith(expect.objectContaining({ taskType: 'render_panel' }));
-      expect(database.connectMock).not.toHaveBeenCalled();
-    });
-
-    test('creates the default enabled render_panel definition when missing', async () => {
-      const database = createDatabaseHarness({
-        enabledTaskTypes: ['blender'],
-      });
-      getDatabasePoolMock.mockResolvedValue(database.pool);
-
-      const store = new TaskTypeDefinitionStore();
-
-      await store.ensureReady();
+      await new TaskTypeDefinitionStore().ensureReady();
 
       expect(initializeDatabaseMock).toHaveBeenCalledTimes(1);
-      expect(database.connectMock).toHaveBeenCalledTimes(1);
-      expect(database.releaseMock).toHaveBeenCalledTimes(1);
-      expect(database.clientQueryMock.mock.calls.map(([sql]) => String(sql))).toEqual([
-        'BEGIN',
-        expect.stringContaining('UPDATE task_type_definitions'),
-        expect.stringContaining('INSERT INTO task_type_definitions'),
-        'COMMIT',
-      ]);
+      const [sql, values] = database.poolQueryMock.mock.calls[0] as [string, unknown[]];
+      expect(sql).toContain('ON CONFLICT (worker_name, task_type, version) DO NOTHING');
+      expect(values[0]).toBe('render_panel');
+      expect(values[1]).toBe('默认的 render_panel 任务定义。');
+      expect(values[3]).toBe('system');
 
-      expect(database.clientQueryMock).toHaveBeenNthCalledWith(
-        2,
-        expect.stringContaining('WHERE task_type = $1 AND enabled = true'),
-        ['render_panel', 'system'],
-      );
-
-      const insertCall = database.clientQueryMock.mock.calls[2];
-      expect(insertCall?.[1]).toEqual([
-        'render_panel',
-        1,
-        true,
-        '默认的 render_panel 任务定义。',
-        expect.any(String),
-        'system',
-        'system',
-      ]);
-
-      const insertedDefinition = JSON.parse(String(insertCall?.[1]?.[4]));
+      const insertedDefinition = JSON.parse(String(values[2]));
       expect(insertedDefinition).toMatchObject({
         consumer_key: 'render_panel_consumer',
         payload: {
@@ -111,72 +72,50 @@ describe('TaskTypeDefinitionStore.ensureReady', () => {
   });
 
   describe('blender built-in seed', () => {
-    test('creates an enabled blender definition when one is missing', async () => {
-      const database = createDatabaseHarness({
-        enabledTaskTypes: ['render_panel'],
-      });
+    test('inserts blender definition with execution timeout and correct payload fields', async () => {
+      const database = createDatabaseHarness();
       getDatabasePoolMock.mockResolvedValue(database.pool);
 
-      const store = new TaskTypeDefinitionStore();
-      const createSpy = vi.spyOn(store, 'create').mockResolvedValue(createRecord('blender'));
-
-      await store.ensureReady();
+      await new TaskTypeDefinitionStore().ensureReady();
 
       expect(initializeDatabaseMock).toHaveBeenCalledTimes(1);
-      expect(createSpy).toHaveBeenCalledTimes(1);
-      expect(createSpy.mock.calls[0]?.[0]).toMatchObject({
-        taskType: 'blender',
-        version: 1,
-        enabled: true,
-        description: '默认的 blender 任务定义。',
-        actor: 'system',
-        definitionJson: {
-          consumer_key: 'blender_consumer',
-          payload: {
-            allow_unknown_fields: false,
-            fields: {
-              workflow: { type: 'string', required: true },
-              scene_id: { type: 'string', required: true },
-              shot_id: { type: 'string', required: true },
-              model_id: { type: 'string', required: false },
-              prompt: { type: 'string', required: false },
-              pace: { type: 'object', required: false },
-              'inputs.image.assetUri': { type: 'string', required: false },
-              agent: { type: 'string', required: false, default: 'codex' },
-              runner_target: { type: 'string', required: false, default: 'gpu' },
-            },
+      // blender is the second built-in
+      const [sql, values] = database.poolQueryMock.mock.calls[1] as [string, unknown[]];
+      expect(sql).toContain('ON CONFLICT (worker_name, task_type, version) DO NOTHING');
+      expect(values[0]).toBe('blender');
+      expect(values[1]).toBe('默认的 blender 任务定义。');
+      expect(values[3]).toBe('system');
+
+      const insertedDefinition = JSON.parse(String(values[2]));
+      expect(insertedDefinition).toMatchObject({
+        consumer_key: 'blender_consumer',
+        execution: { timeout_seconds: 1800 },
+        payload: {
+          allow_unknown_fields: false,
+          fields: {
+            workflow: { type: 'string', required: true },
+            scene_id: { type: 'string', required: true },
+            shot_id: { type: 'string', required: true },
+            model_id: { type: 'string', required: false },
+            prompt: { type: 'string', required: false },
+            pace: { type: 'object', required: false },
+            'inputs.image.assetUri': { type: 'string', required: false },
+            agent: { type: 'string', required: false, default: 'codex' },
+            runner_target: { type: 'string', required: false, default: 'gpu' },
           },
         },
       });
     });
 
-    test('does not create a blender definition when an enabled one already exists', async () => {
-      const database = createDatabaseHarness({
-        enabledTaskTypes: ['render_panel', 'blender'],
-      });
+    test('INSERT is always attempted; DB handles idempotency via ON CONFLICT', async () => {
+      const database = createDatabaseHarness();
       getDatabasePoolMock.mockResolvedValue(database.pool);
 
-      const store = new TaskTypeDefinitionStore();
-      const createSpy = vi.spyOn(store, 'create').mockResolvedValue(createRecord('blender'));
+      await new TaskTypeDefinitionStore().ensureReady();
 
-      await store.ensureReady();
-
-      expect(createSpy).not.toHaveBeenCalledWith(expect.objectContaining({ taskType: 'blender' }));
-    });
-
-    test('does not create a blender definition when any blender version already exists', async () => {
-      const database = createDatabaseHarness({
-        enabledTaskTypes: ['render_panel'],
-        countsByTaskType: { blender: 1 },
-      });
-      getDatabasePoolMock.mockResolvedValue(database.pool);
-
-      const store = new TaskTypeDefinitionStore();
-      const createSpy = vi.spyOn(store, 'create').mockResolvedValue(createRecord('blender'));
-
-      await store.ensureReady();
-
-      expect(createSpy).not.toHaveBeenCalledWith(expect.objectContaining({ taskType: 'blender' }));
+      // Both built-ins get an INSERT attempt; no transaction needed
+      expect(database.connectMock).not.toHaveBeenCalled();
+      expect(database.poolQueryMock).toHaveBeenCalledTimes(2);
     });
   });
 });
@@ -226,6 +165,11 @@ function createDatabaseHarness(options: DatabaseHarnessOptions = {}) {
   }));
 
   const poolQueryMock = vi.fn(async (sql: string, values?: unknown[]) => {
+    // ensureBuiltInDefinition uses a direct pool INSERT with ON CONFLICT DO NOTHING
+    if (sql.includes('ON CONFLICT (worker_name, task_type, version) DO NOTHING')) {
+      return { rowCount: 0, rows: [] };
+    }
+
     if (sql.includes('WHERE task_type = $1 AND enabled = true')) {
       const taskType = String(values?.[0] || '');
       return enabledTaskTypes.has(taskType)

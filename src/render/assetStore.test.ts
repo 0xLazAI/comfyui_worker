@@ -58,6 +58,8 @@ afterEach(() => {
 test.each([
   ['scene.blend', 'blend', 'application/x-blender'],
   ['mesh.obj', 'obj', 'model/obj'],
+  ['model.glb', 'glb', 'model/gltf-binary'],
+  ['scene.gltf', 'gltf', 'model/gltf+json'],
   ['render.png', 'png', 'image/png'],
   ['metadata.json', 'json', 'application/json'],
   ['script.py', 'py', 'text/x-python'],
@@ -135,4 +137,22 @@ test('uploadWorkerAsset keeps supported filename extension when explicit content
     Key: `projects/project-123/blender-artifacts/${uploaded.filename}`,
     ContentType: 'image/png',
   });
+});
+
+test.each([
+  ['model/gltf-binary', 'glb'],
+  ['model/gltf+json', 'gltf'],
+])('uploadWorkerAsset falls back to %s extension %s when the filename has none', async (contentType, extension) => {
+  const { uploadWorkerAsset } = await loadAssetStore();
+  const buffer = Buffer.from('asset-bytes');
+
+  const uploaded = await uploadWorkerAsset('project-123', 'blender-artifacts', {
+    buffer,
+    filenameHint: 'output',
+    contentType,
+  });
+
+  // `model/gltf+json` contains "json"; the gltf branch must win over the json branch.
+  expect(uploaded.filename).toMatch(new RegExp(`^20260610-[A-Za-z0-9_-]+\\.${extension}$`));
+  expect(uploaded.contentType).toBe(contentType);
 });

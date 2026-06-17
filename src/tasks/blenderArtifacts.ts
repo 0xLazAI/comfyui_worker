@@ -8,16 +8,14 @@ import { ProviderRequestError } from '../render/errors.js';
 import { uploadWorkerAsset } from '../render/assetStore.js';
 import { taskStore } from './taskStore.js';
 
-export const REQUIRED_ARTIFACT_KINDS = [
-  'blend',
-  'model_obj',
-  'preview',
-  'summary',
-  'pace',
-  'generated_script',
-] as const;
+// PAILang produces a single output per job (the GLB). `generated_script` is
+// uploaded worker-side from the in-memory script, so it is not required from
+// the runner. blend/preview/summary/pace are intentionally dropped for now.
+export const REQUIRED_ARTIFACT_KINDS = ['model_glb'] as const;
 
 export type RequiredArtifactKind = (typeof REQUIRED_ARTIFACT_KINDS)[number];
+
+const GENERATED_SCRIPT_KIND = 'generated_script';
 
 export async function uploadArtifacts(
   taskId: string,
@@ -30,7 +28,9 @@ export async function uploadArtifacts(
   const uploadedArtifacts: Array<Record<string, unknown>> = [];
 
   for (const artifact of artifacts) {
-    const downloaded = await downloadBlenderRunArtifact(terminalStatus.run_id, artifact);
+    const downloaded = await downloadBlenderRunArtifact(terminalStatus.run_id, artifact, {
+      baseUrl: terminalStatus.pailang_base_url,
+    });
     if (!downloaded.buffer.byteLength) {
       throw new ProviderRequestError(
         `Blender API returned an empty artifact: ${artifact.kind}`,
@@ -63,6 +63,45 @@ export async function uploadArtifacts(
   }
 
   return uploadedArtifacts;
+}
+
+/**
+ * Uploads the agent-generated Blender script as a `generated_script` artifact.
+ * The runner does not return it (PAILang yields only the GLB), so it is taken
+ * from the worker's in-memory copy — the pristine script, before the GLB export
+ * epilogue is appended at submit time.
+ */
+export async function uploadGeneratedScriptArtifact(
+  taskId: string,
+  projectId: string,
+  script: string,
+  attemptNo: number,
+  workerName: string,
+): Promise<Record<string, unknown>> {
+  const uploaded = await uploadWorkerAsset(projectId, 'blender', {
+    buffer: Buffer.from(script, 'utf-8'),
+    contentType: 'text/x-python',
+    filenameHint: 'generated_scene.py',
+  });
+  const detail: Record<string, unknown> = {
+    artifact_id: 'generated_scene_py',
+    kind: GENERATED_SCRIPT_KIND,
+    filename: uploaded.filename,
+    content_type: uploaded.contentType,
+    bytes: uploaded.bytes,
+    asset_uri: uploaded.assetUri,
+  };
+
+  await taskStore.appendEvent({
+    taskId,
+    eventType: 'asset_uploaded',
+    attemptNo,
+    workerName,
+    message: 'uploaded blender artifact generated_scene_py',
+    detailJson: detail,
+  });
+
+  return detail;
 }
 
 function buildUploadedArtifactDetail(
@@ -114,32 +153,10 @@ export function inferArtifactKind(
   const artifactId = normalizeArtifactToken(artifact.artifact_id);
   const filename = normalizeArtifactFilename(artifact.filename);
 
-  if (artifactId === 'scene_blend' || filename === 'scene') {
-    return 'blend';
-  }
-  if (artifactId === 'model_obj' || filename === 'model') {
-    return 'model_obj';
-  }
-  if (artifactId === 'preview_png' || filename === 'preview') {
-    return 'preview';
-  }
-  if (artifactId === 'summary_json' || filename === 'summary') {
-    return 'summary';
-  }
-  if (artifactId === 'pace_json' || filename === 'pace') {
-    return 'pace';
-  }
-  if (artifactId === 'generated_scene_py' || filename === 'generated_scene') {
-    return 'generated_script';
+  if (artifactId === 'model_glb' || artifactId === 'model_obj' || filename === 'model') {
+    return 'model_glb';
   }
   return null;
-}
-
-export function findPreviewArtifact(
-  status: BlenderApiRunStatus,
-): BlenderApiArtifactMetadata | null {
-  const artifacts = Array.isArray(status.artifacts) ? status.artifacts : [];
-  return artifacts.find((artifact) => inferArtifactKind(artifact) === 'preview') ?? null;
 }
 
 export function buildArtifactUriMap(

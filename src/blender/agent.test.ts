@@ -55,6 +55,21 @@ const VALID_REFERENCE_ANALYSIS = {
   sceneBrief: 'Reference scene with one hero subject and a focus object.',
 };
 
+const VALID_SCENE_PLAN = JSON.stringify({
+  sceneType: 'indoor basketball arena',
+  isStandardVenue: true,
+  venue: {
+    name: 'FIBA basketball court',
+    canonicalDimensions: '28 x 15 m',
+    buildRules: ['center the set at world origin', 'axis-aligned', 'markings coplanar'],
+    anchors: ['near_hoop', 'center'],
+  },
+  subjects: [
+    { name: 'shooter', role: 'hero', approxSize: '1.9 m', placement: 'near center', action: 'jump shot' },
+  ],
+  camera: { position: 'high diagonal spectator', lookAt: 'center', focalMm: 35 },
+});
+
 afterEach(async () => {
   setBlenderScriptGeneratorForTests(undefined);
   vi.resetModules();
@@ -180,14 +195,17 @@ test('parseGeneratedBlenderScriptResponse rejects missing script content', () =>
 });
 
 test('generateBlenderScript codex branch uses strict sandbox options and structured output schema', async () => {
-  const threadRun = vi.fn().mockResolvedValue({
-    finalResponse: JSON.stringify({
-      notes: ['generated'],
-      referenceAnalysis: VALID_REFERENCE_ANALYSIS,
-      script: 'import bpy\nbpy.ops.object.select_all()\n',
-      summary: 'generated blender script',
-    }),
-  });
+  const threadRun = vi
+    .fn()
+    .mockResolvedValueOnce({ finalResponse: VALID_SCENE_PLAN })
+    .mockResolvedValueOnce({
+      finalResponse: JSON.stringify({
+        notes: ['generated'],
+        referenceAnalysis: VALID_REFERENCE_ANALYSIS,
+        script: 'import bpy\nbpy.ops.object.select_all()\n',
+        summary: 'generated blender script',
+      }),
+    });
   const startThread = vi.fn().mockReturnValue({
     id: 'thread_live',
     run: threadRun,
@@ -240,28 +258,31 @@ test('generateBlenderScript codex branch uses strict sandbox options and structu
       webSearchMode: 'disabled',
       workingDirectory: '/tmp/blender-job',
     });
-    expect(threadRun).toHaveBeenCalledTimes(1);
+    expect(threadRun).toHaveBeenCalledTimes(2);
 
-    const [input, turnOptions] = threadRun.mock.calls[0] as [
+    // Turn 1 — analysis: the image is attached and the scene-plan schema is used.
+    const [planInput, planOptions] = threadRun.mock.calls[0] as [
       Array<{ path?: string; text?: string; type: string }>,
       { outputSchema: { properties: Record<string, unknown> } },
     ];
-    expect(input).toEqual([
-      {
-        text: expect.stringContaining('Workflow: blender-create-3d'),
-        type: 'text',
-      },
-      {
-        path: '/tmp/source.png',
-        type: 'local_image',
-      },
+    expect(planInput).toEqual([
+      { text: expect.stringContaining('ANALYSIS step'), type: 'text' },
+      { path: '/tmp/source.png', type: 'local_image' },
     ]);
-    expect((input[0] as { text: string }).text).toContain('Task id: task_123');
-    expect((input[0] as { text: string }).text).toContain(
-      'Populate `referenceAnalysis` first',
-    );
-    expect(turnOptions.outputSchema.properties).toHaveProperty('referenceAnalysis');
-    expect(turnOptions.outputSchema.properties).toHaveProperty('script');
+    expect(planOptions.outputSchema.properties).toHaveProperty('venue');
+    expect(planOptions.outputSchema.properties).toHaveProperty('isStandardVenue');
+
+    // Turn 2 — generation: text-only (image already in thread context), script schema.
+    const [scriptInput, scriptOptions] = threadRun.mock.calls[1] as [
+      string,
+      { outputSchema: { properties: Record<string, unknown> } },
+    ];
+    expect(typeof scriptInput).toBe('string');
+    expect(scriptInput).toContain('Workflow: blender-create-3d');
+    expect(scriptInput).toContain('Task id: task_123');
+    expect(scriptInput).toContain('Populate `referenceAnalysis` first');
+    expect(scriptOptions.outputSchema.properties).toHaveProperty('referenceAnalysis');
+    expect(scriptOptions.outputSchema.properties).toHaveProperty('script');
     expect(result.referenceAnalysis).toMatchObject({
       cameraBrief: VALID_REFERENCE_ANALYSIS.cameraBrief,
       primarySubjects: VALID_REFERENCE_ANALYSIS.primarySubjects,
@@ -275,6 +296,7 @@ test('generateBlenderScript codex branch uses strict sandbox options and structu
 test('generateBlenderScript runs a violation repair turn on the same thread when needed', async () => {
   const threadRun = vi
     .fn()
+    .mockResolvedValueOnce({ finalResponse: VALID_SCENE_PLAN })
     .mockResolvedValueOnce({
       finalResponse: JSON.stringify({
         notes: ['first attempt'],
@@ -311,8 +333,9 @@ test('generateBlenderScript runs a violation repair turn on the same thread when
     workingDirectory: '/tmp/blender-job',
   });
 
-  expect(threadRun).toHaveBeenCalledTimes(2);
-  const [repairInput] = threadRun.mock.calls[1] as [string];
+  // plan turn + script turn + violation repair turn
+  expect(threadRun).toHaveBeenCalledTimes(3);
+  const [repairInput] = threadRun.mock.calls[2] as [string];
   expect(repairInput).toContain('violates the worker contract');
   expect(repairInput).toContain('BLENDER_EEVEE_NEXT');
   expect(result.summary).toBe('repaired script');
@@ -576,16 +599,16 @@ test('buildBlenderScriptPrompt includes workflow context, identifiers, update pr
   expect(prompt).toContain('Shot id: shot_010');
   expect(prompt).toContain('Model id: model_abc');
   expect(prompt).toContain('Task id: task_123');
-  expect(prompt).toContain('User prompt: Add a glass canopy and sharper rim light.');
   expect(prompt).toContain('Agent provider: codex');
   expect(prompt).toContain('Runner target: gpu');
   expect(prompt).toContain('Reference image path: /tmp/shot-010.png');
   expect(prompt).toContain('Update prompt: Add a glass canopy and sharper rim light.');
+  expect(prompt).not.toContain('User prompt:');
   expect(prompt).toContain('Agent instructions from agent.md');
   expect(prompt).toContain('low-poly + scene blocking + storyboard previs');
   expect(prompt).toContain('Blender Invocation Contract');
   expect(prompt).toContain('"schema_version": "pace-1"');
-  expect(prompt).toContain('PACE, TASK_ID, SCENE_ID, SHOT_ID, OUTPUT_DIR');
+  expect(prompt).toContain('TASK_ID, SCENE_ID, SHOT_ID, OUTPUT_DIR');
   expect(prompt).toContain('Name the hero mesh with the Model id below.');
   expect(prompt).toContain('Do not save or export files; the runner saves all artifacts.');
 });
@@ -626,7 +649,7 @@ test('buildBlenderScriptPrompt stays scene-generic and demands image-specific an
   expect(prompt).toContain(
     'User prompt: Match the reference composition and keep labels out of the scene.',
   );
-  expect(prompt).toContain('Update prompt: not provided');
+  expect(prompt).not.toContain('Update prompt:');
   expect(prompt).toContain(
     'For create-3d, apply the user prompt as primary creative direction alongside the reference image and PACE.',
   );

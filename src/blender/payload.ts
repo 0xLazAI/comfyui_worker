@@ -19,7 +19,9 @@ interface UnknownMap {
 const DEFAULT_AGENT: BlenderAgent = 'codex';
 const DEFAULT_RUNNER_TARGET: BlenderRunnerTarget = 'gpu';
 const DEFAULT_PACE_SCHEMA_VERSION = 'pai-blender-pace-draft-2026-06-09';
-const VALID_AGENTS = new Set<BlenderAgent>(['codex', 'claude']);
+// `claude` remains a valid type, but the adapter is not implemented yet (see agent.ts), so we reject
+// it here at payload validation instead of letting it submit a task that throws at runtime.
+const VALID_AGENTS = new Set<BlenderAgent>(['codex']);
 const VALID_RUNNER_TARGETS = new Set<BlenderRunnerTarget>(['local', 'gpu']);
 
 export function hydrateBlenderTaskPayload(
@@ -237,7 +239,7 @@ function normalizeAgent(value: unknown): BlenderAgent {
   }
   const normalized = requireString(value, 'payload.agent') as BlenderAgent;
   if (!VALID_AGENTS.has(normalized)) {
-    throw new ValidationError('payload.agent must be one of: codex, claude');
+    throw new ValidationError('payload.agent must be one of: codex');
   }
   return normalized;
 }

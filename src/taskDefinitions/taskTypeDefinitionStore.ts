@@ -219,34 +219,23 @@ export class TaskTypeDefinitionStore {
   }
 
   private async ensureBuiltInDefinition(definition: BuiltInTaskDefinitionSeed): Promise<void> {
-    const existing = await this.getEnabledByTaskType(definition.taskType);
-    if (existing) {
-      return;
-    }
-
     const pool = await getDatabasePool();
-    const count = await pool.query(
-      `SELECT COUNT(*) AS count
-      FROM task_type_definitions
-      WHERE task_type = $1`,
-      [definition.taskType],
+    // Single atomic upsert: no TOCTOU race when multiple workers start concurrently
+    // against the same shared DB. The conflict arbiter must match the live unique
+    // index `uq_task_type_definitions_worker_type_version (worker_name, task_type,
+    // version)`; worker_name is omitted so it takes its column default.
+    await pool.query(
+      `INSERT INTO task_type_definitions
+        (task_type, version, enabled, description, definition_json, created_by, updated_by)
+       VALUES ($1, 1, true, $2, $3::jsonb, $4, $4)
+       ON CONFLICT (worker_name, task_type, version) DO NOTHING`,
+      [
+        definition.taskType,
+        definition.description,
+        JSON.stringify(definition.definitionJson()),
+        SYSTEM_ACTOR,
+      ],
     );
-    if (Number(count.rows[0]?.count || 0) > 0) {
-      return;
-    }
-
-    await this.create({
-      taskType: definition.taskType,
-      version: 1,
-      enabled: true,
-      description: definition.description,
-      definitionJson: definition.definitionJson(),
-      actor: SYSTEM_ACTOR,
-    }).catch((error: any) => {
-      if (error?.code !== '23505') {
-        throw error;
-      }
-    });
   }
 }
 
