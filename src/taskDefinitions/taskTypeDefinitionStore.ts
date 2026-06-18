@@ -8,9 +8,10 @@ import type {
   TaskTypeDefinitionRecord,
   TaskTypeDefinitionUpdateInput,
 } from './types.js';
-import { RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
+import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
 
 const DEFAULT_TASK_DEFINITION_DESCRIPTION = '默认的 render_panel 任务定义。';
+const DEFAULT_REPLACE_PROP_TASK_DEFINITION_DESCRIPTION = '默认的 replace_prop_panel 任务定义。';
 const SYSTEM_ACTOR = 'system';
 
 export class TaskTypeDefinitionStore {
@@ -260,7 +261,24 @@ export class TaskTypeDefinitionStore {
   }
 
   private async ensureBuiltInDefinitions(): Promise<void> {
-    const existing = await this.getEnabledByWorkerAndTaskType(WORKER_NAME, RENDER_PANEL_TASK_TYPE);
+    await this.ensureBuiltInDefinition({
+      taskType: RENDER_PANEL_TASK_TYPE,
+      description: DEFAULT_TASK_DEFINITION_DESCRIPTION,
+      definitionJson: defaultRenderPanelDefinitionJson(),
+    });
+    await this.ensureBuiltInDefinition({
+      taskType: REPLACE_PROP_PANEL_TASK_TYPE,
+      description: DEFAULT_REPLACE_PROP_TASK_DEFINITION_DESCRIPTION,
+      definitionJson: defaultReplacePropPanelDefinitionJson(),
+    });
+  }
+
+  private async ensureBuiltInDefinition(input: {
+    taskType: string;
+    description: string;
+    definitionJson: TaskDefinitionJson;
+  }): Promise<void> {
+    const existing = await this.getEnabledByWorkerAndTaskType(WORKER_NAME, input.taskType);
     if (existing) {
       return;
     }
@@ -270,7 +288,7 @@ export class TaskTypeDefinitionStore {
       `SELECT COUNT(*) AS count
       FROM task_type_definitions
       WHERE worker_name = $1 AND task_type = $2`,
-      [WORKER_NAME, RENDER_PANEL_TASK_TYPE],
+      [WORKER_NAME, input.taskType],
     );
     if (Number(count.rows[0]?.count || 0) > 0) {
       return;
@@ -278,11 +296,11 @@ export class TaskTypeDefinitionStore {
 
     await this.create({
       workerName: WORKER_NAME,
-      taskType: RENDER_PANEL_TASK_TYPE,
+      taskType: input.taskType,
       version: 1,
       enabled: true,
-      description: DEFAULT_TASK_DEFINITION_DESCRIPTION,
-      definitionJson: defaultRenderPanelDefinitionJson(),
+      description: input.description,
+      definitionJson: input.definitionJson,
       actor: SYSTEM_ACTOR,
     }).catch((error: any) => {
       if (error?.code !== '23505') {
@@ -410,6 +428,107 @@ function defaultRenderPanelDefinitionJson(): TaskDefinitionJson {
           minimum: 0,
           maximum: 128,
           description: '主体 mask 外扩像素。',
+        },
+      },
+    },
+  });
+}
+
+function defaultReplacePropPanelDefinitionJson(): TaskDefinitionJson {
+  return normalizeTaskDefinitionJson({
+    consumer_key: 'replace_prop_panel_consumer',
+    payload: {
+      allow_unknown_fields: false,
+      fields: {
+        workflow: {
+          type: 'string',
+          required: true,
+          description: '逻辑工作流 ID。',
+        },
+        panelId: {
+          type: 'string',
+          required: true,
+          description: '目标 panel 业务 ID。',
+        },
+        'replace.sourceProp': {
+          type: 'string',
+          required: true,
+          description: '用于 grounding 的原始道具描述。',
+        },
+        'replace.instruction': {
+          type: 'string',
+          required: true,
+          description: '替换目标和风格约束。',
+        },
+        'prompt.negativeText': {
+          type: 'string',
+          required: false,
+          default: '',
+          description: '负向提示词。',
+        },
+        'inputs.image.assetUri': {
+          type: 'string',
+          required: true,
+          description: '输入图片资产。',
+        },
+        seed: {
+          type: 'integer',
+          required: false,
+          description: '可选随机种子。',
+        },
+        'params.denoise': {
+          type: 'number',
+          required: false,
+          default: 0.56,
+          minimum: 0,
+          maximum: 1,
+          description: '局部重绘强度。',
+        },
+        'params.growMask': {
+          type: 'integer',
+          required: false,
+          default: 6,
+          minimum: 0,
+          maximum: 128,
+          description: '替换区域 mask 外扩像素。',
+        },
+        'params.guidance': {
+          type: 'number',
+          required: false,
+          default: 3.4,
+          minimum: 0,
+          description: 'Flux guidance 参数。',
+        },
+        'params.steps': {
+          type: 'integer',
+          required: false,
+          default: 24,
+          minimum: 1,
+          maximum: 128,
+          description: '采样步数。',
+        },
+        'params.cfg': {
+          type: 'number',
+          required: false,
+          default: 2,
+          minimum: 0,
+          description: '采样 CFG 参数。',
+        },
+        'params.groundConfidence': {
+          type: 'number',
+          required: false,
+          default: 0.05,
+          minimum: 0,
+          maximum: 1,
+          description: 'Grounding confidence threshold。',
+        },
+        'params.groundTextThreshold': {
+          type: 'number',
+          required: false,
+          default: 0.1,
+          minimum: 0,
+          maximum: 1,
+          description: 'Grounding text threshold。',
         },
       },
     },

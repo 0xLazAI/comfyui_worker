@@ -1,7 +1,11 @@
 import { PROVIDER_POLL_INTERVAL_SECONDS, STEPHEN_RENDER_BASE_URL } from '../infra/constants.js';
 import { ProviderRequestError, TaskRejectedError } from './errors.js';
-import type { NormalizedRenderPanelPayload } from './payload.js';
-import type { WorkflowDefinition } from './workflowCatalog.js';
+import type { ParsedPanelId } from './panelId.js';
+
+export interface StephenRenderTarget {
+  projectId: string;
+  panel: ParsedPanelId;
+}
 
 export interface StephenRenderStatus {
   job_id: string;
@@ -21,17 +25,14 @@ export interface StephenRenderStatus {
 }
 
 export async function submitStephenRender(
-  payload: NormalizedRenderPanelPayload,
-  workflow: WorkflowDefinition,
-  sourceImageBase64: string,
+  target: StephenRenderTarget,
+  body: Record<string, unknown>,
 ): Promise<StephenRenderStatus> {
   ensureBaseUrl();
   const submitUrl = new URL(
-    `/api/project/${encodeURIComponent(payload.projectId)}/scene/${encodeURIComponent(payload.panel.providerSceneId)}/shot/${encodeURIComponent(payload.panel.providerShotId)}/panel/${encodeURIComponent(payload.panel.panelNumber)}/render`,
+    `/api/project/${encodeURIComponent(target.projectId)}/scene/${encodeURIComponent(target.panel.providerSceneId)}/shot/${encodeURIComponent(target.panel.providerShotId)}/panel/${encodeURIComponent(target.panel.panelNumber)}/render`,
     STEPHEN_RENDER_BASE_URL,
   );
-
-  const body = buildSubmitBody(payload, workflow, sourceImageBase64);
   const response = await fetch(submitUrl, {
     method: 'POST',
     headers: {
@@ -57,36 +58,12 @@ export async function submitStephenRender(
 }
 
 export async function pollStephenRenderUntilTerminal(
-  payload: NormalizedRenderPanelPayload,
+  projectId: string,
   submitted: StephenRenderStatus,
   onUpdate?: (status: StephenRenderStatus) => Promise<void> | void,
 ): Promise<StephenRenderStatus> {
-  ensureBaseUrl();
-  const statusUrl = new URL(
-    submitted.status_url || `/api/project/${encodeURIComponent(payload.projectId)}/render/${encodeURIComponent(String(submitted.job_id || '').trim())}`,
-    STEPHEN_RENDER_BASE_URL,
-  );
-
   while (true) {
-    const response = await fetch(statusUrl, { method: 'GET' });
-    const data = await parseJsonResponse(response);
-
-    if (!response.ok) {
-      if (response.status >= 400 && response.status < 500) {
-        throw new TaskRejectedError(extractMessage(data, `Stephen status request rejected (${response.status})`), 'provider_status_rejected');
-      }
-      throw new ProviderRequestError(
-        extractMessage(data, `Stephen status request failed with HTTP ${response.status}`),
-        response.status,
-        'provider_status_failed',
-        data,
-      );
-    }
-
-    const status = data as StephenRenderStatus;
-    if (status.status_url === undefined) {
-      status.status_url = statusUrl.pathname;
-    }
+    const status = await getStephenRenderStatus(projectId, submitted);
     await onUpdate?.(status);
 
     if (status.status === 'done') {
@@ -101,6 +78,37 @@ export async function pollStephenRenderUntilTerminal(
 
     await sleep(PROVIDER_POLL_INTERVAL_SECONDS * 1000);
   }
+}
+
+export async function getStephenRenderStatus(
+  projectId: string,
+  reference: Pick<StephenRenderStatus, 'job_id' | 'status_url'>,
+): Promise<StephenRenderStatus> {
+  ensureBaseUrl();
+  const statusUrl = new URL(
+    reference.status_url || `/api/project/${encodeURIComponent(projectId)}/render/${encodeURIComponent(String(reference.job_id || '').trim())}`,
+    STEPHEN_RENDER_BASE_URL,
+  );
+  const response = await fetch(statusUrl, { method: 'GET' });
+  const data = await parseJsonResponse(response);
+
+  if (!response.ok) {
+    if (response.status >= 400 && response.status < 500) {
+      throw new TaskRejectedError(extractMessage(data, `Stephen status request rejected (${response.status})`), 'provider_status_rejected');
+    }
+    throw new ProviderRequestError(
+      extractMessage(data, `Stephen status request failed with HTTP ${response.status}`),
+      response.status,
+      'provider_status_failed',
+      data,
+    );
+  }
+
+  const status = data as StephenRenderStatus;
+  if (status.status_url === undefined) {
+    status.status_url = statusUrl.pathname;
+  }
+  return status;
 }
 
 export async function downloadStephenRenderImage(status: StephenRenderStatus): Promise<{
@@ -125,27 +133,6 @@ export async function downloadStephenRenderImage(status: StephenRenderStatus): P
     buffer: Buffer.from(arrayBuffer),
     contentType: response.headers.get('content-type') || 'image/png',
     filename: String(status.filename || absolute.pathname.split('/').pop() || 'render.png'),
-  };
-}
-
-function buildSubmitBody(
-  payload: NormalizedRenderPanelPayload,
-  workflow: WorkflowDefinition,
-  sourceImageBase64: string,
-): Record<string, unknown> {
-  return {
-    project: payload.projectId,
-    workflow: workflow.providerWorkflowId,
-    backend: workflow.backend,
-    base_model: workflow.baseModel,
-    positive: payload.prompt.text,
-    negative: payload.prompt.negativeText,
-    seed: payload.seed,
-    inpaint: {
-      init_b64: sourceImageBase64,
-      denoise: payload.extraParams.denoise,
-      grow_mask: payload.extraParams.growMask,
-    },
   };
 }
 

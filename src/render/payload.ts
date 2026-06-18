@@ -4,7 +4,7 @@ import { ValidationError } from '../infra/HttpError.js';
 import { parsePanelId, type ParsedPanelId } from './panelId.js';
 import { getWorkflowDefinition, type WorkflowDefinition } from './workflowCatalog.js';
 
-interface StringMap {
+export interface StringMap {
   [key: string]: unknown;
 }
 
@@ -70,7 +70,7 @@ function normalizePrompt(value: unknown, workflow: WorkflowDefinition): {
   return { text, negativeText };
 }
 
-function normalizeInputs(value: unknown, workflow: WorkflowDefinition): {
+export function normalizeInputs(value: unknown, workflow: WorkflowDefinition): {
   imageAssetUri: string | null;
 } {
   const inputs = requireObject(value, 'payload.inputs');
@@ -85,14 +85,14 @@ function normalizeInputs(value: unknown, workflow: WorkflowDefinition): {
   return { imageAssetUri };
 }
 
-function extractWorkflowId(value: unknown): string {
+export function extractWorkflowId(value: unknown): string {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return requireString((value as Record<string, unknown>).id, 'payload.workflow.id');
   }
   return requireString(value, 'payload.workflow');
 }
 
-function extractPanel(payload: Record<string, unknown>): ParsedPanelId {
+export function extractPanel(payload: Record<string, unknown>): ParsedPanelId {
   const panelId = optionalString(payload.panelId);
   if (panelId) {
     return parsePanelId(panelId);
@@ -115,15 +115,19 @@ function extractPanel(payload: Record<string, unknown>): ParsedPanelId {
   throw new ValidationError('payload.panelId is required');
 }
 
-function normalizeExtraParams(value: unknown, workflow: WorkflowDefinition): Record<string, string | number | boolean> {
-  const raw = value === undefined ? {} : requireObject(value, 'payload.extraParams');
+export function normalizeExtraParams(
+  value: unknown,
+  workflow: WorkflowDefinition,
+  field = 'payload.extraParams',
+): Record<string, string | number | boolean> {
+  const raw = value === undefined ? {} : requireObject(value, field);
   const output: Record<string, string | number | boolean> = {};
 
   for (const [key, definition] of Object.entries(workflow.allowedExtraParams)) {
     const rawValue = raw[key];
     if (rawValue === undefined || rawValue === null || rawValue === '') {
       if (definition.required && definition.defaultValue === undefined) {
-        throw new ValidationError(`payload.extraParams.${key} is required`);
+        throw new ValidationError(`${field}.${key} is required`);
       }
       if (definition.defaultValue !== undefined) {
         output[key] = definition.defaultValue;
@@ -131,12 +135,12 @@ function normalizeExtraParams(value: unknown, workflow: WorkflowDefinition): Rec
       continue;
     }
 
-    output[key] = normalizeTypedValue(rawValue, `payload.extraParams.${key}`, definition);
+    output[key] = normalizeTypedValue(rawValue, `${field}.${key}`, definition);
   }
 
   const unknownKeys = Object.keys(raw).filter((key) => !workflow.allowedExtraParams[key]);
   if (unknownKeys.length) {
-    throw new ValidationError(`payload.extraParams contains unsupported keys: ${unknownKeys.join(', ')}`);
+    throw new ValidationError(`${field} contains unsupported keys: ${unknownKeys.join(', ')}`);
   }
 
   return output;
@@ -193,14 +197,14 @@ export function normalizeProjectRoot(projectRoot: string): string {
   return resolvedRoot;
 }
 
-function requireObject(value: unknown, field: string): StringMap {
+export function requireObject(value: unknown, field: string): StringMap {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new ValidationError(`${field} must be an object`);
   }
   return value as StringMap;
 }
 
-function requireString(value: unknown, field: string): string {
+export function requireString(value: unknown, field: string): string {
   const normalized = optionalString(value);
   if (!normalized) {
     throw new ValidationError(`${field} is required`);
@@ -208,11 +212,11 @@ function requireString(value: unknown, field: string): string {
   return normalized;
 }
 
-function optionalString(value: unknown): string {
+export function optionalString(value: unknown): string {
   return String(value || '').trim();
 }
 
-function normalizeOptionalInteger(value: unknown, field: string): number | null {
+export function normalizeOptionalInteger(value: unknown, field: string): number | null {
   if (value === undefined || value === null || value === '') {
     return null;
   }
