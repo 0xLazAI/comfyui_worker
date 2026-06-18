@@ -3,7 +3,7 @@ import path from 'path';
 import { PLATFORM_API_ENABLED } from '../infra/constants.js';
 import { atomicWriteJson, ensureDirectory, readJsonFile } from '../infra/filesystem.js';
 import { PaiPlatformApiError, paiPlatformClient } from '../platform/paiPlatformClient.js';
-import type { NormalizedRenderPanelPayload } from './payload.js';
+import type { ParsedPanelId } from './panelId.js';
 
 interface StoryboardOutputDocument {
   panel_id: string;
@@ -23,13 +23,14 @@ export interface RenderPanelProjectContext {
 
 export interface StoryboardOutputRecord {
   task_id: string;
-  task_type: 'render_panel';
+  task_type: string;
   workflow: string;
   render_uri: string;
   filename: string;
   seed: number | null;
   source_image_uri: string | null;
   extra_params: Record<string, string | number | boolean>;
+  note?: string | null;
   provider: {
     name: 'stephen_render';
     job_id: string;
@@ -38,13 +39,26 @@ export interface StoryboardOutputRecord {
   created_at: string;
 }
 
+export interface StoryboardPayloadBase {
+  panel: ParsedPanelId;
+  projectId: string;
+  projectRoot: string;
+  workflow: {
+    backend: string;
+  };
+  prompt?: {
+    text?: string;
+    [key: string]: unknown;
+  };
+}
+
 export async function writeStoryboardOutputSidecar(
-  payload: NormalizedRenderPanelPayload,
+  payload: StoryboardPayloadBase,
   output: StoryboardOutputRecord,
   context?: RenderPanelProjectContext,
 ): Promise<string> {
   if (PLATFORM_API_ENABLED) {
-    return writePaceArtifactReference(payload, output, context || await loadRenderPanelProjectContext(payload));
+    return writePaceArtifactReference(payload, output, context || await loadStoryboardProjectContext(payload));
   }
 
   const shotRoot = legacyShotRootPath(payload);
@@ -71,8 +85,8 @@ export async function writeStoryboardOutputSidecar(
   return sidecarPath;
 }
 
-export async function loadRenderPanelProjectContext(
-  payload: NormalizedRenderPanelPayload,
+export async function loadStoryboardProjectContext(
+  payload: StoryboardPayloadBase,
 ): Promise<RenderPanelProjectContext> {
   const manifestPath = 'manifest.yaml';
   const shotManifestPath = paceShotManifestPath(payload);
@@ -135,7 +149,7 @@ async function readExistingSidecar(sidecarPath: string): Promise<StoryboardOutpu
 }
 
 async function writePaceArtifactReference(
-  payload: NormalizedRenderPanelPayload,
+  payload: StoryboardPayloadBase,
   output: StoryboardOutputRecord,
   context: RenderPanelProjectContext,
 ): Promise<string> {
@@ -146,7 +160,7 @@ async function writePaceArtifactReference(
     uri: output.render_uri,
     panel_id: payload.panel.panelId,
     created_at: output.created_at,
-    note: payload.prompt.text,
+    note: output.note ?? payload.prompt?.text ?? null,
     task_id: output.task_id,
     filename: output.filename,
     workflow: output.workflow,
@@ -199,15 +213,15 @@ function cloneObject(value: unknown, pacePath: string, label: string): Record<st
   return structuredClone(value as Record<string, unknown>);
 }
 
-function paceShotManifestPath(payload: NormalizedRenderPanelPayload): string {
+function paceShotManifestPath(payload: StoryboardPayloadBase): string {
   return `scenes/${payload.panel.sceneId}/shots/${payload.panel.shotId}/manifest.json`;
 }
 
-function pacePanelPath(payload: NormalizedRenderPanelPayload): string {
+function pacePanelPath(payload: StoryboardPayloadBase): string {
   return `scenes/${payload.panel.sceneId}/shots/${payload.panel.shotId}/panels/${payload.panel.panelId}.json`;
 }
 
-function legacyShotRootPath(payload: NormalizedRenderPanelPayload): string {
+function legacyShotRootPath(payload: StoryboardPayloadBase): string {
   return path.join(payload.projectRoot, 'scenes', payload.panel.providerSceneId, 'shots', payload.panel.providerShotId);
 }
 

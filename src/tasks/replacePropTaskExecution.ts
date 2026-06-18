@@ -1,15 +1,12 @@
-import { PLATFORM_API_ENABLED, PROVIDER_POLL_INTERVAL_SECONDS } from '../infra/constants.js';
 import { TaskRejectedError } from '../render/errors.js';
-import { hydrateRenderPanelPayload } from '../render/payload.js';
+import { hydrateReplacePropPanelPayload } from '../render/replacePropPayload.js';
 import { finalizeStephenImageWorkflow } from '../render/stephenWorkflowExecution.js';
 import { getStephenRenderStatus } from '../render/stephenRenderClient.js';
 import { writeStoryboardOutputSidecar } from '../render/storyboardOutputs.js';
-import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
-import { readTaskDefinitionBinding } from '../taskDefinitions/definitionSchema.js';
-import { handleReplacePropPanelExecute, REPLACE_PROP_PANEL_CONSUMER_KEY } from './replacePropTaskExecution.js';
 import { enqueueTaskRecord } from './taskScheduler.js';
 import { taskStore } from './taskStore.js';
+import { isTerminalWorkerTaskStatus, utcNow } from './types.js';
 import {
   buildTaskFailureDetail,
   computeRetryDelaySeconds,
@@ -24,16 +21,11 @@ import {
   getStephenProviderRuntimeState,
   mergeStephenProviderRuntimeState,
 } from './taskRuntime.js';
-import { isTerminalWorkerTaskStatus, utcNow } from './types.js';
+import { PROVIDER_POLL_INTERVAL_SECONDS } from '../infra/constants.js';
 
-export const RENDER_PANEL_CONSUMER_KEY = 'render_panel_consumer';
+export const REPLACE_PROP_PANEL_CONSUMER_KEY = 'replace_prop_panel_consumer';
 
-type ConsumerHandler = (
-  envelope: QueueJobEnvelope<{ taskId: string }>,
-  context: QueueHandlerContext,
-) => Promise<void>;
-
-export async function handleRenderPanelExecute(
+export async function handleReplacePropPanelExecute(
   envelope: QueueJobEnvelope<{ taskId: string }>,
   context: QueueHandlerContext,
 ): Promise<void> {
@@ -72,7 +64,7 @@ export async function handleRenderPanelExecute(
     return;
   }
 
-  const payload = hydrateRenderPanelPayload(structuredClone(record.requestPayload), {
+  const payload = hydrateReplacePropPanelPayload(structuredClone(record.requestPayload), {
     taskId,
     projectId: record.projectId,
     projectRoot: extractProjectRoot(record.requestPayload),
@@ -97,13 +89,13 @@ export async function handleRenderPanelExecute(
     eventType: 'started',
     attemptNo: context.attempts,
     workerName,
-    message: 'render_panel reconciliation started',
+    message: 'replace_prop_panel reconciliation started',
   });
 
   try {
     const providerState = getStephenProviderRuntimeState(record.requestPayload);
     if (!providerState) {
-      throw new TaskRejectedError('provider job metadata is missing for render_panel task', 'provider_job_missing');
+      throw new TaskRejectedError('provider job metadata is missing for replace_prop_panel task', 'provider_job_missing');
     }
 
     const status = await getStephenRenderStatus(payload.projectId, {
@@ -125,7 +117,7 @@ export async function handleRenderPanelExecute(
         eventType: 'provider_polled',
         attemptNo: context.attempts,
         workerName,
-        message: `Stephen render status changed to ${normalizedStatus}`,
+        message: `Stephen prop replace status changed to ${normalizedStatus}`,
         detailJson: {
           providerJobId: status.job_id,
           status: normalizedStatus,
@@ -163,14 +155,14 @@ export async function handleRenderPanelExecute(
 
     if (normalizedStatus === 'rejected') {
       const finishedAt = utcNow();
-      const detail = buildTaskFailureDetail(new TaskRejectedError(String(status.error || 'Stephen render rejected'), 'provider_rejected'));
+      const detail = buildTaskFailureDetail(new TaskRejectedError(String(status.error || 'Stephen prop replace rejected'), 'provider_rejected'));
       await taskStore.save({
         ...record,
         requestPayload: requestPayloadWithProvider,
         status: 'rejected',
         progress: null,
         eta: null,
-        message: String(status.error || 'Stephen render rejected'),
+        message: String(status.error || 'Stephen prop replace rejected'),
         errorCode: 'provider_rejected',
         resultPayload: detail,
         currentAttempt: context.attempts,
@@ -184,7 +176,7 @@ export async function handleRenderPanelExecute(
         eventType: 'rejected',
         attemptNo: context.attempts,
         workerName,
-        message: 'render_panel execution rejected',
+        message: 'replace_prop_panel execution rejected',
         detailJson: {
           failure: detail,
         },
@@ -198,21 +190,21 @@ export async function handleRenderPanelExecute(
         finishedAt,
         durationMs: Date.now() - new Date(startedAt).getTime(),
         resultPayload: detail,
-        errorMessage: String(status.error || 'Stephen render rejected'),
+        errorMessage: String(status.error || 'Stephen prop replace rejected'),
       });
       return;
     }
 
     if (normalizedStatus === 'failed') {
       const finishedAt = utcNow();
-      const detail = buildTaskFailureDetail(new Error(String(status.error || 'Stephen render failed')));
+      const detail = buildTaskFailureDetail(new Error(String(status.error || 'Stephen prop replace failed')));
       await taskStore.save({
         ...record,
         requestPayload: requestPayloadWithProvider,
         status: 'failed',
         progress: null,
         eta: null,
-        message: String(status.error || 'Stephen render failed'),
+        message: String(status.error || 'Stephen prop replace failed'),
         errorCode: 'provider_render_failed',
         resultPayload: detail,
         currentAttempt: context.attempts,
@@ -226,7 +218,7 @@ export async function handleRenderPanelExecute(
         eventType: 'failed',
         attemptNo: context.attempts,
         workerName,
-        message: 'render_panel execution failed',
+        message: 'replace_prop_panel execution failed',
         detailJson: {
           failure: detail,
           providerJobId: status.job_id,
@@ -241,7 +233,7 @@ export async function handleRenderPanelExecute(
         finishedAt,
         durationMs: Date.now() - new Date(startedAt).getTime(),
         resultPayload: detail,
-        errorMessage: String(status.error || 'Stephen render failed'),
+        errorMessage: String(status.error || 'Stephen prop replace failed'),
       });
       return;
     }
@@ -288,16 +280,20 @@ export async function handleRenderPanelExecute(
       updatedAt: utcNow(),
     });
 
+    const extraParams = {
+      ...payload.params,
+      sourceProp: payload.replace.sourceProp,
+    };
     const metadataPath = await writeStoryboardOutputSidecar(payload, {
       task_id: taskId,
-      task_type: 'render_panel',
+      task_type: 'replace_prop_panel',
       workflow: payload.workflow.id,
       render_uri: uploadedAsset.assetUri,
       filename: uploadedAsset.filename,
       seed: payload.seed,
       source_image_uri: payload.inputs.imageAssetUri,
-      extra_params: payload.extraParams,
-      note: payload.prompt.text,
+      extra_params: extraParams,
+      note: payload.replace.instruction,
       provider: {
         name: 'stephen_render',
         job_id: String(status.job_id || ''),
@@ -311,7 +307,7 @@ export async function handleRenderPanelExecute(
       eventType: 'metadata_written',
       attemptNo: context.attempts,
       workerName,
-      message: PLATFORM_API_ENABLED ? 'PACE artifact metadata written' : 'storyboard outputs metadata written',
+      message: 'storyboard outputs metadata written',
       detailJson: {
         panelId: payload.panel.panelId,
         sceneId: payload.panel.sceneId,
@@ -333,6 +329,7 @@ export async function handleRenderPanelExecute(
         providerWorkflow: payload.workflow.providerWorkflowId,
         resolvedBaseModel: payload.workflow.baseModel,
         metadataPath,
+        sourceProp: payload.replace.sourceProp,
       },
     };
 
@@ -354,13 +351,13 @@ export async function handleRenderPanelExecute(
       taskId,
       eventType: 'succeeded',
       attemptNo: context.attempts,
-        workerName,
-        message: 'render_panel execution succeeded',
-        detailJson: {
+      workerName,
+      message: 'replace_prop_panel execution succeeded',
+      detailJson: {
         providerJobId: status.job_id,
         renderUri: uploadedAsset.assetUri,
-        },
-      });
+      },
+    });
     await taskStore.saveAttempt({
       taskId,
       attemptNo: context.attempts,
@@ -396,7 +393,7 @@ export async function handleRenderPanelExecute(
           eventType: 'rejected',
           attemptNo: context.attempts,
           workerName,
-          message: 'render_panel execution rejected',
+          message: 'replace_prop_panel execution rejected',
           detailJson: {
             failure: failureDetail,
           },
@@ -428,8 +425,8 @@ export async function handleRenderPanelExecute(
         status: terminalFailure ? 'failed' : 'retry_waiting',
         progress: terminalFailure ? null : 0,
         eta: terminalFailure ? null : retryDelaySeconds,
-        message: error?.message || 'render_panel execution failed',
-        errorCode: 'render_panel_failed',
+        message: error?.message || 'replace_prop_panel execution failed',
+        errorCode: 'replace_prop_panel_failed',
         resultPayload: failureDetail,
         currentAttempt: context.attempts,
         nextRunAt: terminalFailure ? null : new Date(Date.now() + retryDelaySeconds * 1000).toISOString(),
@@ -443,7 +440,7 @@ export async function handleRenderPanelExecute(
           eventType: 'failed',
           attemptNo: context.attempts,
           workerName,
-          message: 'render_panel execution failed',
+          message: 'replace_prop_panel execution failed',
           detailJson: {
             failure: failureDetail,
           },
@@ -457,7 +454,7 @@ export async function handleRenderPanelExecute(
           finishedAt,
           durationMs: Date.now() - new Date(startedAt).getTime(),
           resultPayload: failureDetail,
-          errorMessage: error?.message || 'render_panel execution failed',
+          errorMessage: error?.message || 'replace_prop_panel execution failed',
         });
       } else {
         await taskStore.appendEvent({
@@ -465,7 +462,7 @@ export async function handleRenderPanelExecute(
           eventType: 'retry_scheduled',
           attemptNo: context.attempts,
           workerName,
-          message: 'render_panel scheduled for retry',
+          message: 'replace_prop_panel scheduled for retry',
           detailJson: {
             retryDelaySeconds,
             failure: failureDetail,
@@ -480,59 +477,10 @@ export async function handleRenderPanelExecute(
           finishedAt,
           durationMs: Date.now() - new Date(startedAt).getTime(),
           resultPayload: failureDetail,
-          errorMessage: error?.message || 'render_panel execution failed',
+          errorMessage: error?.message || 'replace_prop_panel execution failed',
         });
       }
     }
     throw error;
   }
 }
-
-export async function handleTaskExecute(
-  envelope: QueueJobEnvelope<{ taskId: string }>,
-  context: QueueHandlerContext,
-): Promise<void> {
-  const taskId = String(envelope.body?.taskId || '').trim();
-  if (!taskId) {
-    throw new Error('taskId is required');
-  }
-
-  const record = await taskStore.get(taskId);
-  if (!record) {
-    throw new Error(`Task not found: ${taskId}`);
-  }
-
-  const binding = readTaskDefinitionBinding(record.requestPayload);
-  const consumerKey = binding?.consumerKey || defaultConsumerKeyForTaskType(record.taskType);
-  const handler = getConsumerHandler(consumerKey);
-  await handler(envelope, context);
-}
-
-export function supportsConsumerKey(consumerKey: string): boolean {
-  return Boolean(CONSUMER_HANDLERS[String(consumerKey || '').trim()]);
-}
-
-function getConsumerHandler(consumerKey: string): ConsumerHandler {
-  const normalized = String(consumerKey || '').trim();
-  const handler = CONSUMER_HANDLERS[normalized];
-  if (!handler) {
-    throw new Error(`Unsupported consumer_key: ${normalized || '(empty)'}`);
-  }
-  return handler;
-}
-
-function defaultConsumerKeyForTaskType(taskType: string): string {
-  const normalized = String(taskType || '').trim();
-  if (normalized === RENDER_PANEL_TASK_TYPE) {
-    return RENDER_PANEL_CONSUMER_KEY;
-  }
-  if (normalized === REPLACE_PROP_PANEL_TASK_TYPE) {
-    return REPLACE_PROP_PANEL_CONSUMER_KEY;
-  }
-  return '';
-}
-
-const CONSUMER_HANDLERS: Record<string, ConsumerHandler> = {
-  [RENDER_PANEL_CONSUMER_KEY]: handleRenderPanelExecute,
-  [REPLACE_PROP_PANEL_CONSUMER_KEY]: handleReplacePropPanelExecute,
-};
