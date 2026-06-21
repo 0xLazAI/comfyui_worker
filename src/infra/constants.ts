@@ -80,6 +80,7 @@ export const PROVIDER_POLL_INTERVAL_SECONDS = integer(
   1,
 );
 export const STEPHEN_RENDER_BASE_URL = pick(process.env.STEPHEN_RENDER_BASE_URL);
+export const STEPHEN_RENDER_PROJECT_ID = 'kumarajiva';
 export const PAI_ASSET_ENDPOINT = pick(process.env.PAI_ASSET_ENDPOINT);
 export const PAI_ASSET_BUCKET = pick(process.env.PAI_ASSET_BUCKET);
 export const PAI_ASSET_REGION = pick(process.env.PAI_ASSET_REGION, 'us-east-1');

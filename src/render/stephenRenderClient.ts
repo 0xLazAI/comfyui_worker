@@ -1,4 +1,4 @@
-import { PROVIDER_POLL_INTERVAL_SECONDS, STEPHEN_RENDER_BASE_URL } from '../infra/constants.js';
+import { PROVIDER_POLL_INTERVAL_SECONDS, STEPHEN_RENDER_BASE_URL, STEPHEN_RENDER_PROJECT_ID } from '../infra/constants.js';
 import { ProviderRequestError, TaskRejectedError } from './errors.js';
 import type { ParsedPanelId } from './panelId.js';
 
@@ -29,8 +29,9 @@ export async function submitStephenRender(
   body: Record<string, unknown>,
 ): Promise<StephenRenderStatus> {
   ensureBaseUrl();
+  const projectId = effectiveStephenProjectId(target.projectId);
   const submitUrl = new URL(
-    `/api/project/${encodeURIComponent(target.projectId)}/scene/${encodeURIComponent(target.panel.providerSceneId)}/shot/${encodeURIComponent(target.panel.providerShotId)}/panel/${encodeURIComponent(target.panel.panelNumber)}/render`,
+    `/api/project/${encodeURIComponent(projectId)}/scene/${encodeURIComponent(target.panel.providerSceneId)}/shot/${encodeURIComponent(target.panel.providerShotId)}/panel/${encodeURIComponent(target.panel.panelNumber)}/render`,
     STEPHEN_RENDER_BASE_URL,
   );
   const response = await fetch(submitUrl, {
@@ -85,8 +86,9 @@ export async function getStephenRenderStatus(
   reference: Pick<StephenRenderStatus, 'job_id' | 'status_url'>,
 ): Promise<StephenRenderStatus> {
   ensureBaseUrl();
+  const effectiveProjectId = effectiveStephenProjectId(projectId);
   const statusUrl = new URL(
-    reference.status_url || `/api/project/${encodeURIComponent(projectId)}/render/${encodeURIComponent(String(reference.job_id || '').trim())}`,
+    reference.status_url || `/api/project/${encodeURIComponent(effectiveProjectId)}/render/${encodeURIComponent(String(reference.job_id || '').trim())}`,
     STEPHEN_RENDER_BASE_URL,
   );
   const response = await fetch(statusUrl, { method: 'GET' });
@@ -157,6 +159,10 @@ function ensureBaseUrl(): void {
   if (!STEPHEN_RENDER_BASE_URL) {
     throw new Error('STEPHEN_RENDER_BASE_URL is required');
   }
+}
+
+function effectiveStephenProjectId(projectId: string): string {
+  return STEPHEN_RENDER_PROJECT_ID || String(projectId || '').trim();
 }
 
 async function sleep(ms: number): Promise<void> {

@@ -1,3 +1,4 @@
+import { STEPHEN_RENDER_PROJECT_ID } from '../infra/constants.js';
 import type { NormalizedRenderPanelPayload } from './payload.js';
 import type { NormalizedReplacePropPanelPayload } from './replacePropPayload.js';
 
@@ -6,7 +7,7 @@ export function buildRenderPanelStephenSubmitBody(
   sourceImageBase64: string,
 ): Record<string, unknown> {
   return {
-    project: payload.projectId,
+    project: STEPHEN_RENDER_PROJECT_ID,
     workflow: payload.workflow.providerWorkflowId,
     backend: payload.workflow.backend,
     base_model: payload.workflow.baseModel,
@@ -26,7 +27,7 @@ export function buildReplacePropStephenSubmitBody(
   sourceImageBase64: string,
 ): Record<string, unknown> {
   return {
-    project: payload.projectId,
+    project: STEPHEN_RENDER_PROJECT_ID,
     workflow: payload.workflow.providerWorkflowId,
     backend: payload.workflow.backend,
     base_model: payload.workflow.baseModel,
