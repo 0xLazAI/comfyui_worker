@@ -1,5 +1,6 @@
 import {
   PROVIDER_POLL_INTERVAL_SECONDS,
+  PROJECTS_ROOT,
   TASK_BACKOFF_SECONDS,
   TASK_MAX_ATTEMPTS,
   TASK_TIMEOUT_SECONDS,
@@ -53,7 +54,7 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
     throw new ValidationError(`unsupported consumer_key for task_type ${input.taskType}: ${consumerKey}`);
   }
 
-  const normalizedProjectRoot = normalizeProjectRoot(input.projectRoot);
+  const normalizedProjectRoot = normalizeProjectRoot(`${PROJECTS_ROOT.replace(/\/+$/, '')}/${input.projectId}`);
   const payloadWithSourceImage = await attachUploadedSourceImage(input.projectId, input.payload, input.sourceImageUpload);
   const payload = attachRuntimeMetadata(
     attachTaskDefinitionBinding(
