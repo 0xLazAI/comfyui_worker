@@ -134,7 +134,6 @@ export function createApp(): express.Express {
       taskId: requireString(body.task_id, 'task_id'),
       taskType: requireString(body.task_type, 'task_type'),
       projectId: requireString(body.project_id, 'project_id'),
-      projectRoot: requireString(body.project_root, 'project_root'),
       payload,
       sourceImageUpload,
       requestId: currentRequestId() ?? null,

@@ -89,7 +89,6 @@ export interface SubmitTaskInput {
   taskId: string;
   taskType: string;
   projectId: string;
-  projectRoot: string;
   payload: Record<string, unknown>;
   sourceImageUpload?: {
     buffer: Buffer;
