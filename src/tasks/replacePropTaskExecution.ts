@@ -317,12 +317,12 @@ export async function handleReplacePropPanelExecute(
     });
 
     const result = {
-      panel_id: payload.panel.panelId,
+      panelId: payload.panel.panelId,
       project: payload.projectId,
       workflow: payload.workflow.id,
       backend: payload.workflow.backend,
       filename: uploadedAsset.filename,
-      render_uri: uploadedAsset.assetUri,
+      renderUri: uploadedAsset.assetUri,
       seed: payload.seed,
       meta: {
         providerJobId: status.job_id,
