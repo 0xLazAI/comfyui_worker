@@ -268,11 +268,11 @@ function buildTaskSchema(definition: TaskTypeDefinitionRecord, workflowIds: stri
     output_schema_version: CONTRACT_VERSION,
     result_properties: definition.taskType === RENDER_PANEL_TASK_TYPE
       ? {
-          panel_id: { type: 'string', description: '目标 panel ID。' },
+          panelId: { type: 'string', description: '目标 panel ID。' },
           project: { type: 'string', description: '项目 slug。' },
           backend: { type: 'string', description: '实际调用的底层 backend。' },
           filename: { type: 'string', description: '最终产物文件名。' },
-          render_uri: { type: 'string', description: '最终图片的 assets:// 引用。' },
+          renderUri: { type: 'string', description: '最终图片的 assets:// 引用。' },
           seed: { type: 'integer', description: '最终使用的种子。' },
         }
       : {},

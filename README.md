@@ -359,20 +359,24 @@ curl -X POST 'http://host/task-definitions' \
 
 当前成功任务会把结果写回：
 
-- `scenes/<scene_id>/shots/<shot_id>/manifest.json`
+- `scenes/<sceneId>/shots/<shotId>/manifest.json`
 - 具体是往 `artifacts[]` 里追加一条记录
 
 记录内容至少包括：
 
 - `kind`
 - `uri`
-- `panel_id`
-- `created_at`
+- `panelId`
+- `createdAt`
+- `mediaType`
+- `source`
+- `status`
 
 其中：
 
 - `uri` 是 `assets://renders/...`
-- `panel_id` 使用 canonical panel id
+- `panelId` 使用 canonical panel id
+- PACE 文件内容遵循 camelCase 字段；旧的 snake_case 字段只保留在本地兼容 sidecar 里
 
 旧的 `storyboard/*.outputs.json` 只作为兼容模式保留，不再是主路径。
 

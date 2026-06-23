@@ -94,7 +94,7 @@ export async function loadStoryboardProjectContext(
 
   if (PLATFORM_API_ENABLED) {
     const manifest = await readRequiredPaceObject(payload.projectId, manifestPath, 'Project manifest file');
-    const project = optionalString(manifest.project);
+    const project = optionalString(manifest.projectId) || optionalString(manifest.project);
     if (project && project !== payload.projectId) {
       throw new Error(`Project manifest project mismatch: expected ${payload.projectId}, got ${project}`);
     }
@@ -158,24 +158,28 @@ async function writePaceArtifactReference(
   const artifact = {
     kind: 'v1_storyboard',
     uri: output.render_uri,
-    panel_id: payload.panel.panelId,
-    created_at: output.created_at,
+    panelId: payload.panel.panelId,
+    createdAt: output.created_at,
     note: output.note ?? payload.prompt?.text ?? null,
-    task_id: output.task_id,
+    taskId: output.task_id,
     filename: output.filename,
     workflow: output.workflow,
     seed: output.seed,
-    source_image_uri: output.source_image_uri,
-    extra_params: output.extra_params,
+    sourceImageUri: output.source_image_uri,
+    extraParams: output.extra_params,
     provider: output.provider,
     backend: payload.workflow.backend,
+    mediaType: 'image/png',
+    source: 'worker_generated',
+    status: 'ready',
   };
 
   const nextArtifacts = existingArtifacts.filter((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       return true;
     }
-    return optionalString((entry as Record<string, unknown>).task_id) !== output.task_id;
+    const entryRecord = entry as Record<string, unknown>;
+    return optionalString(entryRecord.taskId) !== output.task_id && optionalString(entryRecord.task_id) !== output.task_id;
   });
   nextArtifacts.push(artifact);
   shotManifest.artifacts = nextArtifacts;
