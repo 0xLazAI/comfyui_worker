@@ -10,7 +10,11 @@ import {
   WORKER_TOKEN,
   WORKER_VERSION,
 } from '../infra/constants.js';
-import { getSupportedWorkflows, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
+import {
+  getSupportedWorkflows,
+  RENDER_PANEL_TASK_TYPE,
+  REPLACE_PROP_PANEL_TASK_TYPE,
+} from '../render/workflowCatalog.js';
 import { taskTypeDefinitionStore } from '../taskDefinitions/taskTypeDefinitionStore.js';
 import type { TaskDefinitionJson, TaskTypeDefinitionRecord } from '../taskDefinitions/types.js';
 import { atomicWriteJson, atomicWriteText, ensureDirectory } from '../infra/filesystem.js';
@@ -241,6 +245,17 @@ function normalizeWorkerName(value: unknown): string {
   return String(value || '').trim();
 }
 
+const STANDARD_RENDER_RESULT_PROPERTIES: Record<string, unknown> = {
+  panelId: { type: 'string', description: '目标 panel ID。' },
+  project: { type: 'string', description: '项目 slug。' },
+  workflow: { type: 'string', description: '逻辑工作流 ID。' },
+  backend: { type: 'string', description: '实际调用的底层 backend。' },
+  filename: { type: 'string', description: '最终产物文件名。' },
+  renderUri: { type: 'string', description: '最终图片的 assets:// 引用。' },
+  seed: { type: 'integer', description: '最终使用的种子。' },
+  meta: { type: 'object', description: '执行元信息。' },
+};
+
 function buildTaskSchema(definition: TaskTypeDefinitionRecord, workflowIds: string[]): Record<string, unknown> {
   const payload = definition.definitionJson.payload;
   const fields = payload.fields;
@@ -266,15 +281,11 @@ function buildTaskSchema(definition: TaskTypeDefinitionRecord, workflowIds: stri
     input_required: requiredFields,
     input_properties: inputProperties,
     output_schema_version: CONTRACT_VERSION,
-    result_properties: definition.taskType === RENDER_PANEL_TASK_TYPE
-      ? {
-          panelId: { type: 'string', description: '目标 panel ID。' },
-          project: { type: 'string', description: '项目 slug。' },
-          backend: { type: 'string', description: '实际调用的底层 backend。' },
-          filename: { type: 'string', description: '最终产物文件名。' },
-          renderUri: { type: 'string', description: '最终图片的 assets:// 引用。' },
-          seed: { type: 'integer', description: '最终使用的种子。' },
-        }
+    result_properties: (
+      definition.taskType === RENDER_PANEL_TASK_TYPE ||
+      definition.taskType === REPLACE_PROP_PANEL_TASK_TYPE
+    )
+      ? STANDARD_RENDER_RESULT_PROPERTIES
       : {},
   };
 }
