@@ -33,11 +33,25 @@ export function progressForProviderStatus(status: string): number {
       return 25;
     case 'running':
       return 45;
+    case 'staging':
+    case 'unknown':
+      return 30;
     case 'done':
       return 65;
     default:
       return 30;
   }
+}
+
+export function isProviderStatusPending(status: string): boolean {
+  return (
+    status === 'submitted'
+    || status === 'queued'
+    || status === 'running'
+    || status === 'staging'
+    || status === 'unknown'
+    || status.startsWith('extracting_')
+  );
 }
 
 export function normalizeWorkerName(): string {

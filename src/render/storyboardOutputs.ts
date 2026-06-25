@@ -172,7 +172,7 @@ function buildPaceArtifactReference(
   output: StoryboardOutputRecord,
 ): Record<string, unknown> {
   return {
-    kind: 'v1Storyboard',
+    kind: 'v1_storyboard',
     panelId: payload.panel.panelId,
     uri: output.render_uri,
     mediaType: 'image/png',
