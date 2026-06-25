@@ -94,12 +94,6 @@ export async function loadStoryboardProjectContext(
   const panelPath = pacePanelPath(payload);
 
   if (PLATFORM_API_ENABLED) {
-    const manifest = await readRequiredPaceObject(payload.projectId, manifestPath, 'Project manifest file');
-    const project = optionalString(manifest.projectId) || optionalString(manifest.project);
-    if (project && project !== payload.projectId) {
-      throw new Error(`Project manifest project mismatch: expected ${payload.projectId}, got ${project}`);
-    }
-
     const shotManifest = await readRequiredPaceObject(payload.projectId, shotManifestPath, 'Shot manifest file');
     const panel = await readRequiredPaceObject(payload.projectId, panelPath, 'Panel file');
 
@@ -107,7 +101,7 @@ export async function loadStoryboardProjectContext(
       manifestPath,
       shotManifestPath,
       panelPath,
-      manifest,
+      manifest: null,
       shotManifest,
       panel,
     };
@@ -236,7 +230,7 @@ function paceShotManifestPath(payload: StoryboardPayloadBase): string {
 }
 
 function pacePanelPath(payload: StoryboardPayloadBase): string {
-  return `scenes/${payload.panel.sceneId}/shots/${payload.panel.shotId}/panels/${payload.panel.panelId}.json`;
+  return `scenes/${payload.panel.sceneId}/shots/${payload.panel.shotId}/panels/${payload.panel.panelId}/manifest.json`;
 }
 
 function legacyShotRootPath(payload: StoryboardPayloadBase): string {

@@ -281,7 +281,16 @@ class PaiPlatformClient {
       ) {
         writePaceFiles(projectId: $projectId, writes: $writes, patches: $patches) {
           changed { path kind format }
-          validation
+          validation {
+            ok
+            issues {
+              code
+              path
+              field
+              schemaPath
+              message
+            }
+          }
         }
       }
     `, {
