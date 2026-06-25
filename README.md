@@ -24,37 +24,25 @@
 
 ## Platform Mode
 
-当前实现优先按 `pai_platform` `develop` 分支的新 contract 运行：
+当前实现按 `worker-graphql-migration.md` 走 Pai Platform GraphQL：
 
-- worker 注册：`POST /api/workers/register`
-- worker 心跳：`POST /api/workers/{worker_name}/heartbeat`
-- PACE 文件读写：`GET|POST /api/{project_id}/pace/files`
-- 资产下载：`GET /api/{project_id}/assets/url`
+- worker 注册：`registerWorker`
+- worker 心跳：`heartbeatWorker`
+- PACE 文件读取：`paceFile`
+- PACE 产物写入：`writePaceFiles(patches)`，局部 append artifact，不再整文件覆盖 manifest
+- 资产上传：`createAssetUploadUrl`，worker 用返回的 signed URL 上传二进制，只把 `assets://...` 写回 PACE
+- 资产下载：仍使用平台资产 URL 接口解析 `assets://...`
 
 需要的核心配置：
 
 - `PAI_PLATFORM_API_BASE`
 - `PAI_PLATFORM_API_KEY`
-- `PAI_PLATFORM_BEARER_TOKEN`
 
 说明：
 
-- `PAI_PLATFORM_API_KEY` 目前用于平台注册相关接口
-- `PAI_PLATFORM_BEARER_TOKEN` 用于当前 `develop` 分支里仍然要求用户态 Bearer token 的 PACE / assets 路由
-- 如果平台后续把这些路由统一成服务态鉴权，可以再收回这一层
-
-当前仍然保留一层兼容逻辑：
-
-- 结果图上传和 multipart 源图上传暂时仍可直连对象存储
-- 原因是 `pai_platform` 现有 `POST /api/{project_id}/assets/upload-url` 还只支持 storyboard pdf/html，不够通用到 `image/png + assets://renders/...`
-
-所以当前状态是：
-
-- 注册：平台 API
-- 心跳：平台 API
-- PACE：平台 API
-- 源图下载：平台 API
-- 图片上传：临时 S3 fallback
+- worker 只使用 `x-api-key`，不使用用户 bearer token。
+- `projectRoot` 已废弃；平台模式下 worker 不直接读写 `/data/pai-projects/{project_id}`。
+- 本地项目目录、S3 直传只作为 `PAI_PLATFORM_API_BASE` 未配置时的兼容模式。
 
 ## Task Contract
 

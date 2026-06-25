@@ -1,14 +1,12 @@
-import { PLATFORM_API_BASE, PLATFORM_API_ENABLED, PLATFORM_API_KEY, PLATFORM_BEARER_TOKEN } from '../infra/constants.js';
+import { BASE_URL, PLATFORM_API_BASE, PLATFORM_API_ENABLED, PLATFORM_API_KEY } from '../infra/constants.js';
 
-interface ApiEnvelope<T> {
-  ok: boolean;
-  data: T | null;
-  meta?: Record<string, unknown>;
-  error?: {
-    code?: string;
+interface GraphqlResponse<T> {
+  data?: T | null;
+  errors?: Array<{
     message?: string;
-    details?: Record<string, unknown>;
-  } | null;
+    path?: Array<string | number>;
+    extensions?: Record<string, unknown>;
+  }>;
 }
 
 interface PaceFileResponse {
@@ -48,7 +46,7 @@ interface WorkerRegistrationResponse {
 interface WorkerHeartbeatResponse {
   name: string;
   status: string;
-  last_seen_at?: string | null;
+  lastSeenAt?: string | null;
   worker?: Record<string, unknown> | null;
 }
 
@@ -60,11 +58,22 @@ export interface PaceWriteBatchInput {
   patches?: Array<{
     path: string;
     operations: Array<{
-      op: 'add' | 'replace' | 'remove';
+      op: 'ADD' | 'REPLACE' | 'REMOVE' | 'add' | 'replace' | 'remove';
       path: string;
       value?: unknown;
     }>;
   }>;
+}
+
+type PacePatch = NonNullable<PaceWriteBatchInput['patches']>[number];
+type PacePatchOperation = PacePatch['operations'][number];
+
+export interface AssetUploadUrlResponse {
+  assetsUri: string;
+  uploadUrl: string;
+  method?: string;
+  headers: Record<string, string>;
+  expiresIn: number;
 }
 
 export class PaiPlatformApiError extends Error {
@@ -89,19 +98,60 @@ class PaiPlatformClient {
     workerName?: string;
     schema: Record<string, unknown>;
     credentials: Record<string, unknown>;
-    heartbeat?: Record<string, unknown>;
     descriptionMd?: string;
+    maxConcurrent?: number;
   }): Promise<WorkerRegistrationResponse> {
-    return this.requestJson('/api/workers/register', {
-      method: 'POST',
-      body: {
-        worker_name: input.workerName,
-        schema: input.schema,
-        credentials: input.credentials,
-        heartbeat: input.heartbeat,
-        description_md: input.descriptionMd,
-      },
-    });
+    const workerName = input.workerName || String(input.schema.name || '').trim();
+    const description = input.descriptionMd || String(input.schema.description || '').trim();
+    try {
+      const data = await this.requestGraphql<{
+        registerWorker: WorkerRegistrationResponse;
+      }>(`
+        mutation RegisterWorker($input: WorkerRegistrationInput!) {
+          registerWorker(input: $input) {
+            name
+            status
+          }
+        }
+      `, {
+        input: {
+          workerName,
+          schema: input.schema,
+          credentials: input.credentials,
+          heartbeat: {
+            heartbeatAt: new Date().toISOString(),
+            status: 'online',
+            message: 'idle',
+          },
+          descriptionMd: description,
+        },
+      });
+      return data.registerWorker;
+    } catch (error) {
+      if (!isGraphqlSchemaMismatch(error)) {
+        throw error;
+      }
+      const data = await this.requestGraphql<{
+        registerWorker: WorkerRegistrationResponse;
+      }>(`
+        mutation RegisterWorker($input: WorkerRegistrationInput!) {
+          registerWorker(input: $input) {
+            name
+            status
+          }
+        }
+      `, {
+        input: {
+          name: workerName,
+          baseUrl: BASE_URL,
+          description,
+          schema: input.schema,
+          credentials: input.credentials,
+          maxConcurrent: input.maxConcurrent || 1,
+        },
+      });
+      return data.registerWorker;
+    }
   }
 
   async registerNamedWorker(
@@ -109,50 +159,110 @@ class PaiPlatformClient {
     input: {
       schema: Record<string, unknown>;
       credentials: Record<string, unknown>;
-      heartbeat?: Record<string, unknown>;
       descriptionMd?: string;
+      maxConcurrent?: number;
     },
   ): Promise<WorkerRegistrationResponse> {
-    return this.requestJson(`/api/workers/${encodeURIComponent(workerName)}/registration`, {
-      method: 'PUT',
-      body: {
-        schema: input.schema,
-        credentials: input.credentials,
-        heartbeat: input.heartbeat,
-        description_md: input.descriptionMd,
-      },
+    return this.registerWorker({
+      workerName,
+      schema: input.schema,
+      credentials: input.credentials,
+      descriptionMd: input.descriptionMd,
+      maxConcurrent: input.maxConcurrent,
     });
   }
 
   async heartbeatWorker(
     workerName: string,
     heartbeat: {
-      heartbeat_at?: string;
       status?: string;
-      message?: string;
+      capacity?: {
+        running: number;
+        maxConcurrent: number;
+      };
     },
   ): Promise<WorkerHeartbeatResponse> {
-    return this.requestJson(`/api/workers/${encodeURIComponent(workerName)}/heartbeat`, {
-      method: 'POST',
-      body: heartbeat,
-    });
+    const capacity = heartbeat.capacity || {
+      running: 0,
+      maxConcurrent: 1,
+    };
+    try {
+      const data = await this.requestGraphql<{
+        heartbeatWorker: WorkerHeartbeatResponse;
+      }>(`
+        mutation HeartbeatWorker($workerName: String!, $input: WorkerHeartbeatInput!) {
+          heartbeatWorker(workerName: $workerName, input: $input) {
+            name
+            status
+            lastSeenAt
+          }
+        }
+      `, {
+        workerName,
+        input: {
+          heartbeatAt: new Date().toISOString(),
+          status: heartbeat.status || 'online',
+          message: 'idle',
+          extra: {
+            capacity,
+          },
+        },
+      });
+      return data.heartbeatWorker;
+    } catch (error) {
+      if (!isGraphqlSchemaMismatch(error)) {
+        throw error;
+      }
+      const data = await this.requestGraphql<{
+        heartbeatWorker: WorkerHeartbeatResponse;
+      }>(`
+        mutation HeartbeatWorker($name: String!, $input: WorkerHeartbeatInput!) {
+          heartbeatWorker(name: $name, input: $input) {
+            name
+            status
+            lastSeenAt
+          }
+        }
+      `, {
+        name: workerName,
+        input: {
+          status: heartbeat.status || 'online',
+          capacity,
+        },
+      });
+      return data.heartbeatWorker;
+    }
   }
 
   async readPaceFiles(projectId: string, paths: string[]): Promise<PaceFilesReadResponse> {
-    const query = new URLSearchParams();
-    for (const path of paths) {
-      query.append('path', path);
-    }
-    return this.requestJson(`/api/${encodeURIComponent(projectId)}/pace/files?${query.toString()}`, {
-      method: 'GET',
-    });
+    const files = await Promise.all(paths.map((path) => this.readPaceFile(projectId, path)));
+    return {
+      project: projectId,
+      files,
+    };
   }
 
   async readPaceFile(projectId: string, path: string): Promise<PaceFileResponse> {
-    const response = await this.readPaceFiles(projectId, [path]);
-    const file = response.files[0];
+    const data = await this.requestGraphql<{
+      paceFile: PaceFileResponse | null;
+    }>(`
+      query ReadPaceFile($projectId: String!, $path: String!) {
+        paceFile(projectId: $projectId, path: $path) {
+          path
+          kind
+          format
+          sizeBytes
+          updatedAt
+          value
+        }
+      }
+    `, {
+      projectId,
+      path,
+    });
+    const file = data.paceFile;
     if (!file) {
-      throw new PaiPlatformApiError(`PACE file was not returned: ${path}`, 502, 'pace_file_missing', {
+      throw new PaiPlatformApiError(`PACE file was not returned: ${path}`, 404, 'pace_file_missing', {
         projectId,
         path,
       });
@@ -161,13 +271,98 @@ class PaiPlatformClient {
   }
 
   async writePaceFiles(projectId: string, input: PaceWriteBatchInput): Promise<PaceFilesBatchResponse> {
-    return this.requestJson(`/api/${encodeURIComponent(projectId)}/pace/files`, {
-      method: 'POST',
-      body: {
-        writes: input.writes || [],
-        patches: input.patches || [],
-      },
+    const data = await this.requestGraphql<{
+      writePaceFiles: PaceFilesBatchResponse;
+    }>(`
+      mutation WritePaceFiles(
+        $projectId: String!
+        $writes: [PaceFileWriteInput!]
+        $patches: [PaceFilePatchInput!]
+      ) {
+        writePaceFiles(projectId: $projectId, writes: $writes, patches: $patches) {
+          changed { path kind format }
+          validation
+        }
+      }
+    `, {
+      projectId,
+      writes: input.writes || [],
+      patches: normalizePacePatches(input.patches || []),
     });
+    return data.writePaceFiles;
+  }
+
+  async deletePaceFiles(projectId: string, paths: string[]): Promise<{
+    deleted: Array<{ path: string; type: string }>;
+    recycled: Array<{ path: string; recycledPath: string }>;
+  }> {
+    const data = await this.requestGraphql<{
+      deletePaceFiles: {
+        deleted: Array<{ path: string; type: string }>;
+        recycled: Array<{ path: string; recycledPath: string }>;
+      };
+    }>(`
+      mutation DeletePaceFiles($projectId: String!, $paths: [String!]!) {
+        deletePaceFiles(projectId: $projectId, paths: $paths) {
+          deleted { path type }
+          recycled { path recycledPath }
+        }
+      }
+    `, {
+      projectId,
+      paths,
+    });
+    return data.deletePaceFiles;
+  }
+
+  async createAssetUploadUrl(input: {
+    projectId: string;
+    assetKind: string;
+    contentType: string;
+  }): Promise<AssetUploadUrlResponse> {
+    try {
+      const data = await this.requestGraphql<{
+        createAssetUploadUrl: AssetUploadUrlResponse;
+      }>(`
+        mutation CreateAssetUploadUrl($projectId: String!, $assetKind: AssetKind!, $contentType: String!) {
+          createAssetUploadUrl(projectId: $projectId, assetKind: $assetKind, contentType: $contentType) {
+            assetsUri
+            uploadUrl
+            headers
+            expiresIn
+          }
+        }
+      `, {
+        projectId: input.projectId,
+        assetKind: input.assetKind,
+        contentType: input.contentType,
+      });
+      return data.createAssetUploadUrl;
+    } catch (error) {
+      if (!isGraphqlSchemaMismatch(error)) {
+        throw error;
+      }
+      const data = await this.requestGraphql<{
+        createAssetUploadUrl: AssetUploadUrlResponse;
+      }>(`
+        mutation CreateAssetUploadUrl($input: AssetUploadUrlInput!) {
+          createAssetUploadUrl(input: $input) {
+            assetsUri
+            uploadUrl
+            method
+            headers
+            expiresIn
+          }
+        }
+      `, {
+        input: {
+          projectId: input.projectId,
+          assetKind: input.assetKind,
+          contentType: input.contentType,
+        },
+      });
+      return data.createAssetUploadUrl;
+    }
   }
 
   async resolveAssetDownloadUrl(projectId: string, assetUri: string): Promise<string> {
@@ -192,69 +387,61 @@ class PaiPlatformClient {
       return redirectUrl;
     }
 
-    const envelope = await this.parseEnvelope<unknown>(response);
+    const text = await response.text().catch(() => '');
     throw new PaiPlatformApiError(
-      envelope.error?.message || `Pai Platform assets URL request failed with HTTP ${response.status}`,
+      extractRestErrorMessage(text) || `Pai Platform assets URL request failed with HTTP ${response.status}`,
       response.status,
-      envelope.error?.code || 'assets_url_failed',
-      envelope.error?.details || {
+      'assets_url_failed',
+      {
         projectId,
         assetUri,
+        raw: text,
       },
     );
   }
 
-  private async requestJson<T>(path: string, input: {
-    method: 'GET' | 'POST' | 'PUT';
-    body?: unknown;
-  }): Promise<T> {
+  private async requestGraphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
     this.ensureEnabled();
-    const response = await fetch(this.buildUrl(path), {
-      method: input.method,
+    const response = await fetch(this.buildUrl('/api/graphql/'), {
+      method: 'POST',
       headers: this.buildHeaders({
         'content-type': 'application/json',
       }),
-      body: input.body === undefined ? undefined : JSON.stringify(input.body),
+      body: JSON.stringify({
+        query,
+        variables,
+      }),
     });
-    const envelope = await this.parseEnvelope<T>(response);
-    if (!response.ok || !envelope.ok || envelope.data === null) {
+    const payload = await this.parseGraphqlResponse<T>(response);
+    const firstError = payload.errors?.[0];
+    if (!response.ok || firstError || payload.data === undefined || payload.data === null) {
       throw new PaiPlatformApiError(
-        envelope.error?.message || `Pai Platform request failed with HTTP ${response.status}`,
+        firstError?.message || `Pai Platform GraphQL request failed with HTTP ${response.status}`,
         response.status,
-        envelope.error?.code || 'pai_platform_request_failed',
-        envelope.error?.details || {},
+        String(firstError?.extensions?.code || 'pai_platform_graphql_failed'),
+        {
+          errors: payload.errors || [],
+        },
       );
     }
-    return envelope.data;
+    return payload.data;
   }
 
-  private async parseEnvelope<T>(response: Response): Promise<ApiEnvelope<T>> {
+  private async parseGraphqlResponse<T>(response: Response): Promise<GraphqlResponse<T>> {
     const text = await response.text();
     if (!text.trim()) {
       return {
-        ok: false,
         data: null,
-        error: {
-          code: 'empty_platform_response',
-          message: 'Pai Platform returned an empty response.',
-          details: {},
-        },
+        errors: [{ message: 'Pai Platform returned an empty GraphQL response.' }],
       };
     }
 
     try {
-      return JSON.parse(text) as ApiEnvelope<T>;
+      return JSON.parse(text) as GraphqlResponse<T>;
     } catch {
       return {
-        ok: false,
         data: null,
-        error: {
-          code: 'invalid_platform_response',
-          message: 'Pai Platform returned non-JSON content.',
-          details: {
-            raw: text,
-          },
-        },
+        errors: [{ message: 'Pai Platform returned a non-JSON GraphQL response.' }],
       };
     }
   }
@@ -269,10 +456,6 @@ class PaiPlatformClient {
     if (PLATFORM_API_KEY) {
       headers['x-api-key'] = PLATFORM_API_KEY;
     }
-    const bearerToken = PLATFORM_BEARER_TOKEN || PLATFORM_API_KEY;
-    if (bearerToken) {
-      headers.authorization = `Bearer ${bearerToken}`;
-    }
     return headers;
   }
 
@@ -284,3 +467,59 @@ class PaiPlatformClient {
 }
 
 export const paiPlatformClient = new PaiPlatformClient();
+
+function extractRestErrorMessage(text: string): string {
+  if (!text.trim()) {
+    return '';
+  }
+  try {
+    const parsed = JSON.parse(text) as {
+      error?: {
+        message?: string;
+      };
+      message?: string;
+    };
+    return String(parsed.error?.message || parsed.message || '').trim();
+  } catch {
+    return text.slice(0, 240);
+  }
+}
+
+function isGraphqlSchemaMismatch(error: unknown): boolean {
+  if (!(error instanceof PaiPlatformApiError)) {
+    return false;
+  }
+  const messages = extractGraphqlErrorMessages(error.details).join('\n');
+  return /Unknown argument|Unknown field|Cannot query field|Field .* is not defined|got invalid value|was not provided|required field/i.test(messages);
+}
+
+function extractGraphqlErrorMessages(details: Record<string, unknown>): string[] {
+  const errors = details.errors;
+  if (!Array.isArray(errors)) {
+    return [];
+  }
+  return errors.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return '';
+    }
+    return String((entry as Record<string, unknown>).message || '').trim();
+  }).filter(Boolean);
+}
+
+function normalizePacePatches(patches: PaceWriteBatchInput['patches']): PaceWriteBatchInput['patches'] {
+  return (patches || []).map((patch) => ({
+    ...patch,
+    operations: patch.operations.map((operation) => ({
+      ...operation,
+      op: normalizePatchOp(operation.op),
+    })),
+  }));
+}
+
+function normalizePatchOp(op: PacePatchOperation['op']): 'ADD' | 'REPLACE' | 'REMOVE' {
+  const normalized = String(op || '').trim().toUpperCase();
+  if (normalized === 'ADD' || normalized === 'REPLACE' || normalized === 'REMOVE') {
+    return normalized;
+  }
+  throw new PaiPlatformApiError(`Unsupported PACE patch op: ${op}`, 500, 'unsupported_pace_patch_op');
+}

@@ -21,7 +21,7 @@ import {
   getStephenProviderRuntimeState,
   mergeStephenProviderRuntimeState,
 } from './taskRuntime.js';
-import { PROVIDER_POLL_INTERVAL_SECONDS } from '../infra/constants.js';
+import { PLATFORM_API_ENABLED, PROVIDER_POLL_INTERVAL_SECONDS } from '../infra/constants.js';
 
 export const REPLACE_PROP_PANEL_CONSUMER_KEY = 'replace_prop_panel_consumer';
 
@@ -252,7 +252,7 @@ export async function handleReplacePropPanelExecute(
     });
 
     const uploadedAsset = await finalizeStephenImageWorkflow(payload.projectId, status);
-    const projectContext = await loadStoryboardProjectContextOrReject(payload);
+    const projectContext = PLATFORM_API_ENABLED ? undefined : await loadStoryboardProjectContextOrReject(payload);
 
     await taskStore.appendEvent({
       taskId,

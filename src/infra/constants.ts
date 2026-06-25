@@ -33,7 +33,6 @@ function integerList(value: string, fallback: number[]): number[] {
 export const NODE_ENV = pick(process.env.NODE_ENV, 'development');
 export const PLATFORM_API_BASE = pick(process.env.PAI_PLATFORM_API_BASE);
 export const PLATFORM_API_KEY = pick(process.env.PAI_PLATFORM_API_KEY);
-export const PLATFORM_BEARER_TOKEN = pick(process.env.PAI_PLATFORM_BEARER_TOKEN);
 export const PLATFORM_API_ENABLED = Boolean(PLATFORM_API_BASE);
 export const PORT = integer(pick(process.env.PAI_WORKER_PORT, process.env.COMFYUI_WORKER_PORT, process.env.DEMO_WORKER_PORT, '8080'), 8080, 1);
 export const HOST = pick(process.env.PAI_WORKER_HOST, process.env.COMFYUI_WORKER_HOST, process.env.DEMO_WORKER_HOST, '0.0.0.0');

@@ -1,6 +1,7 @@
 import {
   PROVIDER_POLL_INTERVAL_SECONDS,
   PROJECTS_ROOT,
+  PLATFORM_API_ENABLED,
   TASK_BACKOFF_SECONDS,
   TASK_MAX_ATTEMPTS,
   TASK_TIMEOUT_SECONDS,
@@ -54,7 +55,9 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
     throw new ValidationError(`unsupported consumer_key for task_type ${input.taskType}: ${consumerKey}`);
   }
 
-  const normalizedProjectRoot = normalizeProjectRoot(`${PROJECTS_ROOT.replace(/\/+$/, '')}/${input.projectId}`);
+  const normalizedProjectRoot = PLATFORM_API_ENABLED
+    ? ''
+    : normalizeProjectRoot(`${PROJECTS_ROOT.replace(/\/+$/, '')}/${input.projectId}`);
   const payloadWithSourceImage = await attachUploadedSourceImage(input.projectId, input.payload, input.sourceImageUpload);
   const payload = attachRuntimeMetadata(
     attachTaskDefinitionBinding(
@@ -186,9 +189,7 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
 
 function attachRuntimeMetadata(payload: Record<string, unknown>, projectRoot: string): Record<string, unknown> {
   const normalized = structuredClone(payload);
-  normalized[TASK_RUNTIME_META_KEY] = {
-    projectRoot,
-  };
+  normalized[TASK_RUNTIME_META_KEY] = projectRoot ? { projectRoot } : {};
   return normalized;
 }
 

@@ -58,7 +58,7 @@ export async function writeStoryboardOutputSidecar(
   context?: RenderPanelProjectContext,
 ): Promise<string> {
   if (PLATFORM_API_ENABLED) {
-    return writePaceArtifactReference(payload, output, context || await loadStoryboardProjectContext(payload));
+    return appendPaceArtifactReference(payload, output);
   }
 
   const shotRoot = legacyShotRootPath(payload);
@@ -148,13 +148,11 @@ async function readExistingSidecar(sidecarPath: string): Promise<StoryboardOutpu
   };
 }
 
-async function writePaceArtifactReference(
+async function appendPaceArtifactReference(
   payload: StoryboardPayloadBase,
   output: StoryboardOutputRecord,
-  context: RenderPanelProjectContext,
 ): Promise<string> {
-  const shotManifest = cloneObject(context.shotManifest, context.shotManifestPath, 'Shot manifest file');
-  const existingArtifacts = Array.isArray(shotManifest.artifacts) ? [...shotManifest.artifacts] : [];
+  const shotManifestPath = paceShotManifestPath(payload);
   const artifact = {
     kind: 'v1_storyboard',
     uri: output.render_uri,
@@ -174,24 +172,18 @@ async function writePaceArtifactReference(
     status: 'ready',
   };
 
-  const nextArtifacts = existingArtifacts.filter((entry) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      return true;
-    }
-    const entryRecord = entry as Record<string, unknown>;
-    return optionalString(entryRecord.taskId) !== output.task_id && optionalString(entryRecord.task_id) !== output.task_id;
-  });
-  nextArtifacts.push(artifact);
-  shotManifest.artifacts = nextArtifacts;
-
   await paiPlatformClient.writePaceFiles(payload.projectId, {
-    writes: [{
-      path: context.shotManifestPath,
-      value: shotManifest,
+    patches: [{
+      path: shotManifestPath,
+      operations: [{
+        op: 'ADD',
+        path: '/artifacts/-',
+        value: artifact,
+      }],
     }],
   });
 
-  return context.shotManifestPath;
+  return shotManifestPath;
 }
 
 async function readRequiredPaceObject(

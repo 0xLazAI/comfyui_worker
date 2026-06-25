@@ -185,10 +185,10 @@ function normalizeTypedValue(
 }
 
 export function normalizeProjectRoot(projectRoot: string): string {
-  const normalized = requireString(projectRoot, 'project_root');
   if (PLATFORM_API_ENABLED) {
-    return normalized;
+    return optionalString(projectRoot);
   }
+  const normalized = requireString(projectRoot, 'project_root');
   const resolvedRoot = path.resolve(normalized);
   const resolvedProjectsRoot = path.resolve(PROJECTS_ROOT);
   if (!resolvedRoot.startsWith(`${resolvedProjectsRoot}${path.sep}`) && resolvedRoot !== resolvedProjectsRoot) {

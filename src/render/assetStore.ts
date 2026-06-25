@@ -105,8 +105,28 @@ async function uploadAsset(
   const extension = detectExtension(input.filenameHint, input.contentType);
   const filename = `${utcDateStamp()}-${randomBytes(4).toString('base64url')}.${extension}`;
   const assetUri = `assets://${assetGroup}/${filename}`;
-  const key = buildObjectKey(projectId, assetUri);
   const contentType = input.contentType || guessContentTypeFromFilename(filename);
+
+  if (PLATFORM_API_ENABLED) {
+    const upload = await paiPlatformClient.createAssetUploadUrl({
+      projectId,
+      assetKind: assetKindForGroup(assetGroup),
+      contentType,
+    });
+    await uploadViaSignedUrl(upload.uploadUrl, {
+      method: upload.method || 'PUT',
+      headers: upload.headers || {},
+      buffer: input.buffer,
+    });
+    return {
+      assetUri: upload.assetsUri,
+      filename: filenameFromUri(upload.assetsUri),
+      bytes: input.buffer.byteLength,
+      contentType,
+    };
+  }
+
+  const key = buildObjectKey(projectId, assetUri);
 
   await getS3Client().send(new PutObjectCommand({
     Bucket: PAI_ASSET_BUCKET,
@@ -121,6 +141,38 @@ async function uploadAsset(
     bytes: input.buffer.byteLength,
     contentType,
   };
+}
+
+async function uploadViaSignedUrl(uploadUrl: string, input: {
+  method: string;
+  headers: Record<string, string>;
+  buffer: Buffer;
+}): Promise<void> {
+  const response = await fetch(uploadUrl, {
+    method: input.method,
+    headers: normalizeUploadHeaders(input.headers),
+    body: new Uint8Array(input.buffer),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`asset upload failed with HTTP ${response.status}${text ? `: ${text.slice(0, 240)}` : ''}`);
+  }
+}
+
+function normalizeUploadHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers || {}).map(([key, value]) => [key, String(value)]),
+  );
+}
+
+function assetKindForGroup(assetGroup: string): string {
+  if (assetGroup === 'renders') {
+    return 'RENDER';
+  }
+  if (assetGroup === 'uploads') {
+    return 'RENDER';
+  }
+  return assetGroup.replace(/s$/, '').toUpperCase();
 }
 
 function getS3Client(): S3Client {

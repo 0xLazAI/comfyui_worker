@@ -90,12 +90,8 @@ export class WorkerRegistryPublisher {
       await paiPlatformClient.registerNamedWorker(workerName, {
         schema: this.schemaPayload(workerName, taskDefinitions),
         credentials: this.credentialsPayload(),
-        heartbeat: {
-          heartbeat_at: new Date().toISOString(),
-          status: 'online',
-          message: 'idle',
-        },
         descriptionMd: this.descriptionMarkdown(workerName, taskDefinitions),
+        maxConcurrent: 1,
       });
       return;
     }
@@ -119,9 +115,11 @@ export class WorkerRegistryPublisher {
   private async publishHeartbeatForWorker(workerName: string, status: string, message: string): Promise<void> {
     if (PLATFORM_API_ENABLED) {
       await paiPlatformClient.heartbeatWorker(workerName, {
-        heartbeat_at: new Date().toISOString(),
         status,
-        message,
+        capacity: {
+          running: status === 'online' && message !== 'idle' ? 1 : 0,
+          maxConcurrent: 1,
+        },
       });
       return;
     }
@@ -138,6 +136,14 @@ export class WorkerRegistryPublisher {
     const supportedTaskTypes = taskDefinitions.map((definition) => definition.taskType);
     return {
       name: workerName,
+      description: '通用 render_panel / replace_prop_panel worker，内部转发到 Stephen 平台已注册 workflow，并把最终图片落成 assets:// 引用。',
+      nodeType: WORKER_NODE_TYPE,
+      baseUrl: BASE_URL,
+      healthPath: '/health',
+      tasksPath: '/tasks',
+      capabilitiesPath: '/capabilities',
+      contractVersion: CONTRACT_VERSION,
+      workerVersion: WORKER_VERSION,
       node_type: WORKER_NODE_TYPE,
       base_url: BASE_URL,
       health_path: '/health',
@@ -276,6 +282,13 @@ function buildTaskSchema(definition: TaskTypeDefinitionRecord, workflowIds: stri
   }
 
   return {
+    title: definition.taskType,
+    description: definition.description || `${definition.taskType} task`,
+    payloadSchema: {
+      type: 'object',
+      required: requiredFields,
+      properties: inputProperties,
+    },
     summary: definition.description || `${definition.taskType} task`,
     input_schema_version: CONTRACT_VERSION,
     input_required: requiredFields,

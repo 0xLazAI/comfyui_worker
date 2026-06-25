@@ -1,5 +1,5 @@
 import os from 'os';
-import { WORKER_NAME } from '../infra/constants.js';
+import { PLATFORM_API_ENABLED, WORKER_NAME } from '../infra/constants.js';
 import { TaskRejectedError } from '../render/errors.js';
 import {
   loadStoryboardProjectContext,
@@ -72,6 +72,10 @@ export function extractProjectRoot(requestPayload: Record<string, unknown>): str
   const legacyProjectRoot = String(requestPayload.projectRoot || '').trim();
   if (legacyProjectRoot) {
     return legacyProjectRoot;
+  }
+
+  if (PLATFORM_API_ENABLED) {
+    return '';
   }
 
   throw new Error('request payload is missing _taskRuntime.projectRoot');
