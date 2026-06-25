@@ -252,7 +252,7 @@ export async function handleReplacePropPanelExecute(
     });
 
     const uploadedAsset = await finalizeStephenImageWorkflow(payload.projectId, status);
-    const projectContext = PLATFORM_API_ENABLED ? undefined : await loadStoryboardProjectContextOrReject(payload);
+    const projectContext = await loadStoryboardProjectContextOrReject(payload);
 
     await taskStore.appendEvent({
       taskId,
