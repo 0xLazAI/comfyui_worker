@@ -58,7 +58,8 @@ export async function writeStoryboardOutputSidecar(
   context?: RenderPanelProjectContext,
 ): Promise<string> {
   if (PLATFORM_API_ENABLED) {
-    return appendPaceArtifactReference(payload, output);
+    const resolvedContext = context || await loadStoryboardProjectContext(payload);
+    return appendPaceArtifactReference(payload, output, resolvedContext);
   }
 
   const shotRoot = legacyShotRootPath(payload);
@@ -151,28 +152,11 @@ async function readExistingSidecar(sidecarPath: string): Promise<StoryboardOutpu
 async function appendPaceArtifactReference(
   payload: StoryboardPayloadBase,
   output: StoryboardOutputRecord,
+  context: RenderPanelProjectContext,
 ): Promise<string> {
-  const shotManifestPath = paceShotManifestPath(payload);
-  const artifact = {
-    kind: 'v1_storyboard',
-    uri: output.render_uri,
-    panelId: payload.panel.panelId,
-    createdAt: output.created_at,
-    note: output.note ?? payload.prompt?.text ?? null,
-    taskId: output.task_id,
-    filename: output.filename,
-    workflow: output.workflow,
-    seed: output.seed,
-    sourceImageUri: output.source_image_uri,
-    extraParams: output.extra_params,
-    provider: output.provider,
-    backend: payload.workflow.backend,
-    mediaType: 'image/png',
-    source: 'worker_generated',
-    status: 'ready',
-  };
-
-  await paiPlatformClient.writePaceFiles(payload.projectId, {
+  const shotManifestPath = context.shotManifestPath || paceShotManifestPath(payload);
+  const artifact = buildPaceArtifactReference(payload, output);
+  const response = await paiPlatformClient.writePaceFiles(payload.projectId, {
     patches: [{
       path: shotManifestPath,
       operations: [{
@@ -182,8 +166,46 @@ async function appendPaceArtifactReference(
       }],
     }],
   });
+  if (!response.validation.ok) {
+    throw new Error(formatPaceValidationIssues(response.validation.issues));
+  }
 
   return shotManifestPath;
+}
+
+function buildPaceArtifactReference(
+  payload: StoryboardPayloadBase,
+  output: StoryboardOutputRecord,
+): Record<string, unknown> {
+  return {
+    kind: 'v1Storyboard',
+    panelId: payload.panel.panelId,
+    uri: output.render_uri,
+    mediaType: 'image/png',
+    source: 'worker_generated',
+    status: 'ready',
+  };
+}
+
+function formatPaceValidationIssues(issues: Array<Record<string, unknown>>): string {
+  if (!issues.length) {
+    return 'PACE validation failed.';
+  }
+
+  const messages = issues
+    .map((issue) => {
+      const path = String(issue.path || issue.field || '').trim();
+      const message = String(issue.message || issue.detail || issue.code || '').trim();
+      if (path && message) {
+        return `${path}: ${message}`;
+      }
+      return path || message;
+    })
+    .filter(Boolean);
+
+  return messages.length
+    ? `PACE validation failed: ${messages.join('; ')}`
+    : 'PACE validation failed.';
 }
 
 async function readRequiredPaceObject(
