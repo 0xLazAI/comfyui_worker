@@ -66,8 +66,8 @@ const workflowCatalog: Record<string, WorkflowDefinition> = {
     baseModel: 'flux2_dev_fp8mixed.safetensors',
     requiresSourceImage: true,
     requiresPromptText: false,
-    inputSchemaVersion: '2026-06-18',
-    outputSchemaVersion: '2026-06-18',
+    inputSchemaVersion: '2026-06-25',
+    outputSchemaVersion: '2026-06-25',
     allowedExtraParams: {
       denoise: {
         type: 'number',
@@ -122,6 +122,12 @@ const workflowCatalog: Record<string, WorkflowDefinition> = {
         minimum: 0,
         maximum: 1,
         defaultValue: 0.10,
+      },
+      maskMode: {
+        type: 'string',
+        description: '自动 mask 模式：auto 自动判断是否使用长条 corridor，precise 强制使用 SAM2 精确 mask。',
+        required: false,
+        defaultValue: 'auto',
       },
     },
   },

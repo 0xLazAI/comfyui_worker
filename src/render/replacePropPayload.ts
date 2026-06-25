@@ -1,3 +1,4 @@
+import { ValidationError } from '../infra/HttpError.js';
 import type { ParsedPanelId } from './panelId.js';
 import {
   extractPanel,
@@ -11,6 +12,8 @@ import {
   requireString,
 } from './payload.js';
 import { getWorkflowDefinition, type WorkflowDefinition } from './workflowCatalog.js';
+
+export type ReplacePropMaskMode = 'auto' | 'precise';
 
 export interface NormalizedReplacePropPanelPayload {
   workflow: WorkflowDefinition;
@@ -26,7 +29,9 @@ export interface NormalizedReplacePropPanelPayload {
     imageAssetUri: string | null;
   };
   seed: number | null;
-  params: Record<string, string | number | boolean>;
+  params: Record<string, string | number | boolean> & {
+    maskMode: ReplacePropMaskMode;
+  };
   projectId: string;
   projectRoot: string;
   taskId: string;
@@ -47,7 +52,7 @@ export function hydrateReplacePropPanelPayload(
   const prompt = normalizePrompt(payload.prompt);
   const inputs = normalizeInputs(payload.inputs, workflow);
   const seed = normalizeOptionalInteger(payload.seed, 'payload.seed');
-  const params = normalizeExtraParams(payload.params, workflow, 'payload.params');
+  const params = normalizeReplacePropParams(normalizeExtraParams(payload.params, workflow, 'payload.params'));
   const projectRoot = normalizeProjectRoot(context.projectRoot);
 
   return {
@@ -62,6 +67,23 @@ export function hydrateReplacePropPanelPayload(
     projectRoot,
     taskId: context.taskId,
   };
+}
+
+function normalizeReplacePropParams(
+  params: Record<string, string | number | boolean>,
+): NormalizedReplacePropPanelPayload['params'] {
+  return {
+    ...params,
+    maskMode: normalizeMaskMode(params.maskMode),
+  };
+}
+
+function normalizeMaskMode(value: unknown): ReplacePropMaskMode {
+  const normalized = String(value || 'auto').trim().toLowerCase();
+  if (normalized === 'auto' || normalized === 'precise') {
+    return normalized;
+  }
+  throw new ValidationError('payload.params.maskMode must be one of: auto, precise');
 }
 
 function normalizeReplace(value: unknown): {

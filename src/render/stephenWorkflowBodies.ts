@@ -40,6 +40,7 @@ export function buildReplacePropStephenSubmitBody(
     cfg: payload.params.cfg,
     ground_confidence: payload.params.groundConfidence,
     ground_text_threshold: payload.params.groundTextThreshold,
+    mask_mode: payload.params.maskMode,
     seed: payload.seed,
     inpaint: {
       init_b64: sourceImageBase64,

@@ -273,6 +273,7 @@ function buildTaskSchema(definition: TaskTypeDefinitionRecord, workflowIds: stri
       type: rule.type,
       description: rule.description || inferFieldDescription(definition.definitionJson, fieldPath, workflowIds),
       default: rule.default,
+      enum: rule.enum,
       minimum: rule.minimum,
       maximum: rule.maximum,
     };

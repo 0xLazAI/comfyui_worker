@@ -270,6 +270,7 @@ export class TaskTypeDefinitionStore {
       taskType: REPLACE_PROP_PANEL_TASK_TYPE,
       description: DEFAULT_REPLACE_PROP_TASK_DEFINITION_DESCRIPTION,
       definitionJson: defaultReplacePropPanelDefinitionJson(),
+      requiredFieldPaths: ['params.maskMode'],
     });
   }
 
@@ -277,9 +278,28 @@ export class TaskTypeDefinitionStore {
     taskType: string;
     description: string;
     definitionJson: TaskDefinitionJson;
+    requiredFieldPaths?: string[];
   }): Promise<void> {
     const existing = await this.getEnabledByWorkerAndTaskType(WORKER_NAME, input.taskType);
     if (existing) {
+      const missingFields = (input.requiredFieldPaths || [])
+        .filter((fieldPath) => !existing.definitionJson.payload.fields[fieldPath]);
+      if (missingFields.length) {
+        const definitions = await this.list({
+          workerName: WORKER_NAME,
+          taskType: input.taskType,
+        });
+        const nextVersion = Math.max(existing.version, ...definitions.map((definition) => definition.version)) + 1;
+        await this.create({
+          workerName: WORKER_NAME,
+          taskType: input.taskType,
+          version: nextVersion,
+          enabled: true,
+          description: input.description,
+          definitionJson: input.definitionJson,
+          actor: SYSTEM_ACTOR,
+        });
+      }
       return;
     }
 
@@ -529,6 +549,13 @@ function defaultReplacePropPanelDefinitionJson(): TaskDefinitionJson {
           minimum: 0,
           maximum: 1,
           description: 'Grounding text threshold。',
+        },
+        'params.maskMode': {
+          type: 'string',
+          required: false,
+          default: 'auto',
+          enum: ['auto', 'precise'],
+          description: 'Mask 模式。auto 默认自动判断是否使用长条 corridor；precise 强制使用 SAM2 精确 mask。',
         },
       },
     },

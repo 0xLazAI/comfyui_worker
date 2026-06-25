@@ -124,10 +124,12 @@ function normalizeTaskDefinitionFieldRule(value: unknown, field: string): TaskDe
   const description = optionalString(rule.description);
   const minimum = normalizeOptionalNumber(rule.minimum, `${field}.minimum`);
   const maximum = normalizeOptionalNumber(rule.maximum, `${field}.maximum`);
+  const enumValues = normalizeOptionalEnum(rule.enum, `${field}.enum`, type);
   const defaultValue = rule.default === undefined ? undefined : normalizeDefaultValue(rule.default, `${field}.default`, {
     type,
     minimum,
     maximum,
+    enum: enumValues,
   });
 
   if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
@@ -138,6 +140,7 @@ function normalizeTaskDefinitionFieldRule(value: unknown, field: string): TaskDe
     type,
     required,
     default: defaultValue,
+    enum: enumValues,
     description: description || undefined,
     minimum,
     maximum,
@@ -157,40 +160,43 @@ function normalizeValueByRule(
   field: string,
   rule: TaskDefinitionFieldRule,
 ): string | number | boolean | Record<string, unknown> {
+  let normalized: string | number | boolean | Record<string, unknown>;
   if (rule.type === 'string') {
-    return requireString(value, field);
-  }
-
-  if (rule.type === 'object') {
-    return requireObject(value, field);
-  }
-
-  if (rule.type === 'boolean') {
+    normalized = requireString(value, field);
+  } else if (rule.type === 'object') {
+    normalized = requireObject(value, field);
+  } else if (rule.type === 'boolean') {
     if (typeof value === 'boolean') {
-      return value;
+      normalized = value;
+    } else {
+      const normalizedBoolean = String(value || '').trim().toLowerCase();
+      if (normalizedBoolean === 'true') {
+        normalized = true;
+      } else if (normalizedBoolean === 'false') {
+        normalized = false;
+      } else {
+        throw new ValidationError(`${field} must be a boolean`);
+      }
     }
-    const normalized = String(value || '').trim().toLowerCase();
-    if (normalized === 'true') {
-      return true;
+  } else {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      throw new ValidationError(`${field} must be a ${rule.type}`);
     }
-    if (normalized === 'false') {
-      return false;
+
+    normalized = rule.type === 'integer' ? Math.floor(numeric) : numeric;
+    if (rule.minimum !== undefined && normalized < rule.minimum) {
+      throw new ValidationError(`${field} must be >= ${rule.minimum}`);
     }
-    throw new ValidationError(`${field} must be a boolean`);
+    if (rule.maximum !== undefined && normalized > rule.maximum) {
+      throw new ValidationError(`${field} must be <= ${rule.maximum}`);
+    }
   }
 
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    throw new ValidationError(`${field} must be a ${rule.type}`);
+  if (rule.enum && !isEnumMatch(normalized, rule.enum)) {
+    throw new ValidationError(`${field} must be one of: ${rule.enum.join(', ')}`);
   }
 
-  const normalized = rule.type === 'integer' ? Math.floor(numeric) : numeric;
-  if (rule.minimum !== undefined && normalized < rule.minimum) {
-    throw new ValidationError(`${field} must be >= ${rule.minimum}`);
-  }
-  if (rule.maximum !== undefined && normalized > rule.maximum) {
-    throw new ValidationError(`${field} must be <= ${rule.maximum}`);
-  }
   return normalized;
 }
 
@@ -199,13 +205,44 @@ function normalizeDefaultValue(
   field: string,
   rule: TaskDefinitionFieldRule,
 ): string | number | boolean | Record<string, unknown> {
+  let normalized: string | number | boolean | Record<string, unknown>;
   if (rule.type === 'string') {
-    return String(value ?? '');
+    normalized = String(value ?? '');
+  } else if (rule.type === 'object') {
+    normalized = requireObject(value, field);
+  } else {
+    normalized = normalizeValueByRule(value, field, rule);
   }
-  if (rule.type === 'object') {
-    return requireObject(value, field);
+
+  if (rule.enum && !isEnumMatch(normalized, rule.enum)) {
+    throw new ValidationError(`${field} must be one of: ${rule.enum.join(', ')}`);
   }
-  return normalizeValueByRule(value, field, rule);
+  return normalized;
+}
+
+function normalizeOptionalEnum(
+  value: unknown,
+  field: string,
+  type: TaskDefinitionFieldType,
+): Array<string | number | boolean> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (type === 'object') {
+    throw new ValidationError(`${field} is not supported for object fields`);
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new ValidationError(`${field} must be a non-empty array`);
+  }
+
+  return value.map((entry, index) => normalizeValueByRule(entry, `${field}.${index}`, { type })) as Array<string | number | boolean>;
+}
+
+function isEnumMatch(value: string | number | boolean | Record<string, unknown>, enumValues: Array<string | number | boolean>): boolean {
+  if (typeof value === 'object') {
+    return false;
+  }
+  return enumValues.includes(value);
 }
 
 function validateFieldPath(fieldPath: string): void {
