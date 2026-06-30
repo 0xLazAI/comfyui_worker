@@ -1,8 +1,5 @@
-export type BlenderWorkflowId =
-  | 'blender-create-3d'
-  | 'blender-update-3d'
-  | 'blender-pace-3d'
-  | 'blender-pace-review';
+// This worker runs only the blender-pace-review batch workflow.
+export type BlenderWorkflowId = 'blender-pace-review';
 
 export type BlenderAgent = 'codex' | 'claude';
 
@@ -28,10 +25,9 @@ export interface BlenderPace extends JsonObject {
 }
 
 // ---------------------------------------------------------------------------
-// PACE 0.2 document — the multi-scene director-intent format consumed by
-// blender-pace-3d (build) and blender-pace-review (audit/fix). Fields are kept
-// optional and loosely typed (extends JsonObject) so unknown PACE keys survive
-// the round-trip; the build/review agents read whatever is present.
+// PACE 0.2 document — the director-intent format consumed by blender-pace-review
+// (audit/fix). Fields are kept optional and loosely typed (extends JsonObject) so
+// unknown PACE keys survive the round-trip; the review agent reads whatever is present.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -150,10 +146,11 @@ export interface HydratedBlenderTaskPayload {
   modelId: string | null;
   prompt: string | null;
   pace: BlenderPace;
-  paceDocument: PaceDocument | null; // non-null for blender-pace-3d
-  // Batch of (scene, GLB) pairs for blender-pace-review. Each scene's PACE document is
-  // fetched from the Pai Platform at execution time, not carried in the payload.
-  reviewBatch: BlenderReviewItem[] | null; // non-null for blender-pace-review
+  // Per-shot PACE document, fetched from the platform at execution time (null until then).
+  paceDocument: PaceDocument | null;
+  // Batch of shots to audit for blender-pace-review. Each shot's PACE document and base
+  // GLB are fetched from the Pai Platform at execution time, not carried in the payload.
+  reviewBatch: BlenderReviewItem[] | null;
   agent: BlenderAgent;
   runnerTarget: BlenderRunnerTarget;
   inputs: {

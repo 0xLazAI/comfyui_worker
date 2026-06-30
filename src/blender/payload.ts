@@ -118,7 +118,7 @@ export function createDefaultPace(workflowId: BlenderWorkflowId, sceneId: string
     },
     event: {
       trigger_frame: 1,
-      type: workflowId === 'blender-update-3d' ? 'update-3d' : 'create-3d',
+      type: 'pace-review',
     },
     lighting: {
       energy: 850,

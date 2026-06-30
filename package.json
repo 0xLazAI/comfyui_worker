@@ -29,6 +29,7 @@
     "redis": "^4.7.0",
     "reflect-metadata": "^0.2.2",
     "typeorm": "^0.3.28",
+    "undici": "^6.27.0",
     "winston": "^3.18.3"
   },
   "devDependencies": {

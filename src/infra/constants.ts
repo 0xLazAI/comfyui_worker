@@ -87,6 +87,12 @@ export const STEPHEN_RENDER_BASE_URL = pick(process.env.STEPHEN_RENDER_BASE_URL)
 export const STEPHEN_RENDER_PROJECT_ID = 'kumarajiva';
 // Online PAILang blender runner (defaults to the Stephen render host, port 8911).
 export const PAI_BLENDER_ONLINE_BASE_URL = pick(process.env.PAI_BLENDER_ONLINE_BASE_URL, process.env.STEPHEN_RENDER_BASE_URL);
+// Runner TLS. The runner is reached over HTTPS; if it presents a private/self-signed
+// cert, point PAI_BLENDER_RUNNER_CA at the CA bundle (PEM path) to trust it securely.
+// PAI_BLENDER_RUNNER_INSECURE_TLS=true disables verification entirely — dev/self-signed
+// ONLY, scoped to the runner connection (not the whole process). CA pinning is preferred.
+export const PAI_BLENDER_RUNNER_CA = pick(process.env.PAI_BLENDER_RUNNER_CA);
+export const PAI_BLENDER_RUNNER_INSECURE_TLS = pick(process.env.PAI_BLENDER_RUNNER_INSECURE_TLS).toLowerCase() === 'true';
 // Per-job Blender wall-clock timeout sent to the runner. PAILang caps this at 600s.
 export const PAI_BLENDER_JOB_TIMEOUT_SECONDS = integer(pick(process.env.PAI_BLENDER_JOB_TIMEOUT_SECONDS, '600'), 600, 5);
 // Polling cadence/timeout against the PAILang job status endpoint.

@@ -109,10 +109,9 @@ export async function uploadGeneratedScriptArtifact(
 }
 
 /**
- * Downloads the single GLB a PACE-scene run produced and uploads it under a
- * scene-scoped artifact id/filename (e.g. `s001` / `s001.glb`). blender-pace-3d
- * fans out one run per scene, so the result carries one such `model_glb`
- * artifact per scene — the console grid renders each.
+ * Downloads the single GLB a runner job produced and uploads it under a
+ * scene/shot-scoped artifact id/filename (e.g. `hs001_sh001_op` /
+ * `hs001_sh001_op.glb`) as a `model_glb` artifact.
  */
 export async function uploadSceneGlbArtifact(
   taskId: string,

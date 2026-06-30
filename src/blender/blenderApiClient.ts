@@ -17,12 +17,17 @@
  *
  * All jobs run on the online PAILang runner (PAI_BLENDER_ONLINE_BASE_URL).
  */
+import { readFileSync } from 'node:fs';
+import { Agent } from 'undici';
 import {
   PAI_BLENDER_JOB_TIMEOUT_SECONDS,
   PAI_BLENDER_ONLINE_BASE_URL,
   PAI_BLENDER_POLL_INTERVAL_SECONDS,
   PAI_BLENDER_POLL_TIMEOUT_SECONDS,
+  PAI_BLENDER_RUNNER_CA,
+  PAI_BLENDER_RUNNER_INSECURE_TLS,
 } from '../infra/constants.js';
+import { logger } from '../infra/logger.js';
 import { ProviderRequestError, TaskRejectedError } from '../render/errors.js';
 import { appendExportEpilogue } from './exportEpilogue.js';
 import type { BlenderRunnerTarget } from './types.js';
@@ -52,7 +57,7 @@ export interface BlenderApiRunRequest {
   model_id?: string;
   script: string;
   reference_image?: BlenderApiReferenceImage;
-  /** Routes to the local console mock when `local`, otherwise online PAILang. */
+  /** Always `gpu` (online PAILang); kept for request-shape compatibility. */
   runner_target?: BlenderRunnerTarget;
 }
 
@@ -111,7 +116,7 @@ export async function submitBlenderRun(request: BlenderApiRunRequest): Promise<B
     timeout: PAI_BLENDER_JOB_TIMEOUT_SECONDS,
   };
 
-  const response = await getFetch()(buildUrl(baseUrl, '/api/blender/jobs/export'), {
+  const response = await runnerFetch(buildUrl(baseUrl, '/api/blender/jobs/export'), {
     method: 'POST',
     headers: jsonHeaders(),
     body: JSON.stringify(body),
@@ -154,7 +159,7 @@ export async function pollBlenderRunUntilTerminal(
   const startedAt = getNow()();
 
   while (true) {
-    const response = await getFetch()(statusUrl, { method: 'GET', headers: authHeaders() });
+    const response = await runnerFetch(statusUrl, { method: 'GET', headers: authHeaders() });
     const data = await parseJsonResponse(response);
 
     if (!response.ok) {
@@ -262,7 +267,7 @@ export async function submitBlenderRunBatch(
     timeout: PAI_BLENDER_JOB_TIMEOUT_SECONDS,
   }));
 
-  const response = await getFetch()(buildUrl(baseUrl, '/api/blender/jobs/export/batch'), {
+  const response = await runnerFetch(buildUrl(baseUrl, '/api/blender/jobs/export/batch'), {
     method: 'POST',
     headers: jsonHeaders(),
     body: JSON.stringify({ jobs }),
@@ -316,7 +321,7 @@ export async function pollBlenderBatchUntilTerminal(
   const startedAt = getNow()();
 
   while (true) {
-    const response = await getFetch()(statusUrl, { method: 'GET', headers: authHeaders() });
+    const response = await runnerFetch(statusUrl, { method: 'GET', headers: authHeaders() });
     const data = await parseJsonResponse(response);
 
     if (!response.ok) {
@@ -380,7 +385,7 @@ export async function downloadBlenderRunArtifact(
   // A PAILang job has exactly one downloadable output — the GLB — regardless of
   // the requested artifact id.
   const baseUrl = options?.baseUrl || resolveBaseUrl();
-  const response = await getFetch()(buildUrl(baseUrl, `/api/blender/jobs/${encodeURIComponent(runId)}/output`), {
+  const response = await runnerFetch(buildUrl(baseUrl, `/api/blender/jobs/${encodeURIComponent(runId)}/output`), {
     method: 'GET',
     headers: authHeaders(),
   });
@@ -415,7 +420,7 @@ export async function downloadBlenderRunBlend(
   const url = buildUrl(baseUrl, `/api/blender/jobs/${encodeURIComponent(runId)}/output`);
   url.searchParams.set('artifact', 'blend');
   try {
-    const response = await getFetch()(url, { method: 'GET', headers: authHeaders() });
+    const response = await runnerFetch(url, { method: 'GET', headers: authHeaders() });
     if (!response.ok) return null;
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
@@ -492,6 +497,33 @@ function authHeaders(): Headers {
 
 function getFetch(): typeof fetch {
   return testOverrides?.fetch || fetch;
+}
+
+// Scoped TLS for the runner connection only (NOT a process-wide NODE_TLS bypass).
+// Built once: a CA bundle (secure, preferred) or rejectUnauthorized:false (insecure,
+// explicit dev opt-in). undefined → Node's default verification against the system store.
+let runnerDispatcher: Agent | null | undefined;
+function getRunnerDispatcher(): Agent | undefined {
+  if (runnerDispatcher !== undefined) {
+    return runnerDispatcher ?? undefined;
+  }
+  if (PAI_BLENDER_RUNNER_CA) {
+    runnerDispatcher = new Agent({ connect: { ca: readFileSync(PAI_BLENDER_RUNNER_CA, 'utf8') } });
+  } else if (PAI_BLENDER_RUNNER_INSECURE_TLS) {
+    logger.warn('blender runner TLS verification disabled (PAI_BLENDER_RUNNER_INSECURE_TLS=true) — dev/self-signed only');
+    runnerDispatcher = new Agent({ connect: { rejectUnauthorized: false } });
+  } else {
+    runnerDispatcher = null;
+  }
+  return runnerDispatcher ?? undefined;
+}
+
+/** fetch to the runner, injecting the scoped TLS dispatcher when configured. */
+function runnerFetch(input: Parameters<typeof fetch>[0], init: RequestInit = {}): ReturnType<typeof fetch> {
+  const dispatcher = getRunnerDispatcher();
+  // `dispatcher` is an undici-specific RequestInit extension not in the DOM types.
+  // Test overrides supply their own fetch and ignore it.
+  return getFetch()(input, dispatcher ? ({ ...init, dispatcher } as RequestInit) : init);
 }
 
 function getNow(): () => number {
