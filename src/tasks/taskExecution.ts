@@ -1,30 +1,39 @@
-import os from 'os';
-import { logger } from '../infra/logger.js';
-import { downloadAsset, uploadRenderAsset } from '../render/assetStore.js';
+import { PLATFORM_API_ENABLED, PROVIDER_POLL_INTERVAL_SECONDS } from '../infra/constants.js';
+import { BLENDER_CONSUMER_KEY, handleBlenderExecute } from './blenderTaskExecution.js';
 import { TaskRejectedError } from '../render/errors.js';
-import { hydrateRenderPanelPayload, type NormalizedRenderPanelPayload } from '../render/payload.js';
-import {
-  downloadStephenRenderImage,
-  pollStephenRenderUntilTerminal,
-  submitStephenRender,
-  type StephenRenderStatus,
-} from '../render/stephenRenderClient.js';
+import { hydrateRenderPanelPayload } from '../render/payload.js';
+import { finalizeStephenImageWorkflow } from '../render/stephenWorkflowExecution.js';
+import { getStephenRenderStatus } from '../render/stephenRenderClient.js';
 import { writeStoryboardOutputSidecar } from '../render/storyboardOutputs.js';
+import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
+import { isBlenderTaskType } from '../blender/workflowCatalog.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
 import { readTaskDefinitionBinding } from '../taskDefinitions/definitionSchema.js';
+import { handleReplacePropPanelExecute, REPLACE_PROP_PANEL_CONSUMER_KEY } from './replacePropTaskExecution.js';
+import { enqueueTaskRecord } from './taskScheduler.js';
 import { taskStore } from './taskStore.js';
+import {
+  buildTaskFailureDetail,
+  computeRetryDelaySeconds,
+  expectTask,
+  extractProjectRoot,
+  loadStoryboardProjectContextOrReject,
+  normalizeWorkerName,
+  progressForProviderStatus,
+} from './taskExecutionShared.js';
+import {
+  attachStephenProviderRuntimeState,
+  getStephenProviderRuntimeState,
+  mergeStephenProviderRuntimeState,
+} from './taskRuntime.js';
 import { isTerminalWorkerTaskStatus, utcNow } from './types.js';
-import { WORKER_NAME } from '../infra/constants.js';
 
-const RENDER_PANEL_CONSUMER_KEY = 'render_panel_consumer';
+export const RENDER_PANEL_CONSUMER_KEY = 'render_panel_consumer';
 
-function computeRetryDelaySeconds(backoffSeconds: number[], attemptNo: number): number {
-  if (!backoffSeconds.length) {
-    return 0;
-  }
-  const index = Math.max(0, attemptNo - 1);
-  return backoffSeconds[index] ?? backoffSeconds[backoffSeconds.length - 1] ?? 0;
-}
+type ConsumerHandler = (
+  envelope: QueueJobEnvelope<{ taskId: string }>,
+  context: QueueHandlerContext,
+) => Promise<void>;
 
 export async function handleRenderPanelExecute(
   envelope: QueueJobEnvelope<{ taskId: string }>,
@@ -70,12 +79,13 @@ export async function handleRenderPanelExecute(
     projectId: record.projectId,
     projectRoot: extractProjectRoot(record.requestPayload),
   });
+
   await taskStore.save({
     ...record,
     status: 'running',
     progress: 0,
     eta: null,
-    message: 'resolving source image',
+    message: 'checking provider status',
     errorCode: null,
     queuePublishError: null,
     currentAttempt: context.attempts,
@@ -89,62 +99,29 @@ export async function handleRenderPanelExecute(
     eventType: 'started',
     attemptNo: context.attempts,
     workerName,
-    message: 'render_panel execution started',
+    message: 'render_panel reconciliation started',
   });
 
   try {
-    const sourceImage = await downloadSourceImage(payload);
-    logger.info('task=%s source asset downloaded uri=%s bytes=%d', taskId, sourceImage.assetUri, sourceImage.buffer.byteLength);
+    const providerState = getStephenProviderRuntimeState(record.requestPayload);
+    if (!providerState) {
+      throw new TaskRejectedError('provider job metadata is missing for render_panel task', 'provider_job_missing');
+    }
 
-    const submitted = await submitStephenRender(
-      payload,
-      payload.workflow,
-      sourceImage.buffer.toString('base64'),
-    );
-    await taskStore.save({
-      ...(await expectTask(taskId)),
-      status: 'running',
-      progress: 15,
-      eta: null,
-      message: 'provider submitted',
-      errorCode: null,
-      currentAttempt: context.attempts,
-      workerName,
-      updatedAt: utcNow(),
+    const status = await getStephenRenderStatus(payload.projectId, {
+      job_id: providerState.jobId,
+      status_url: providerState.statusUrl || undefined,
     });
-    await taskStore.appendEvent({
-      taskId,
-      eventType: 'provider_submitted',
-      attemptNo: context.attempts,
-      workerName,
-      message: 'Stephen render submitted',
-      detailJson: {
-        providerJobId: submitted.job_id,
-        status: submitted.status,
-        statusUrl: submitted.status_url,
-        workflow: payload.workflow.providerWorkflowId,
-      },
-    });
+    const normalizedStatus = String(status.status || '').trim() || providerState.lastStatus || 'submitted';
+    const mergedProviderState = mergeStephenProviderRuntimeState(providerState, status);
+    const requestPayloadWithProvider = attachStephenProviderRuntimeState(record.requestPayload, mergedProviderState);
+    const providerChanged =
+      normalizedStatus !== providerState.lastStatus
+      || mergedProviderState.promptId !== providerState.promptId
+      || mergedProviderState.workerName !== providerState.workerName
+      || mergedProviderState.workerUrl !== providerState.workerUrl;
 
-    let lastProviderStatus = String(submitted.status || '').trim();
-    const terminalStatus = await pollStephenRenderUntilTerminal(payload, submitted, async (status) => {
-      const normalizedStatus = String(status.status || '').trim();
-      if (!normalizedStatus || normalizedStatus === lastProviderStatus) {
-        return;
-      }
-      lastProviderStatus = normalizedStatus;
-
-      await taskStore.save({
-        ...(await expectTask(taskId)),
-        status: normalizedStatus === 'done' ? 'running' : 'running',
-        progress: progressForProviderStatus(normalizedStatus),
-        eta: null,
-        message: `provider ${normalizedStatus}`,
-        errorCode: null,
-        currentAttempt: context.attempts,
-        workerName,
-        updatedAt: utcNow(),
-      });
+    if (providerChanged) {
       await taskStore.appendEvent({
         taskId,
         eventType: 'provider_polled',
@@ -154,14 +131,126 @@ export async function handleRenderPanelExecute(
         detailJson: {
           providerJobId: status.job_id,
           status: normalizedStatus,
+          promptId: mergedProviderState.promptId,
+          workerName: mergedProviderState.workerName,
+          workerUrl: mergedProviderState.workerUrl,
           renderUrl: status.render_url || null,
           filename: status.filename || null,
         },
       });
-    });
+    }
+
+    if (normalizedStatus === 'submitted' || normalizedStatus === 'queued' || normalizedStatus === 'running') {
+      const delaySeconds = PROVIDER_POLL_INTERVAL_SECONDS;
+      const inProgressRecord = {
+        ...record,
+        requestPayload: requestPayloadWithProvider,
+        status: 'running' as const,
+        progress: progressForProviderStatus(normalizedStatus),
+        eta: delaySeconds,
+        message: `provider ${normalizedStatus}`,
+        errorCode: null,
+        currentAttempt: context.attempts,
+        nextRunAt: new Date(Date.now() + delaySeconds * 1000).toISOString(),
+        workerName,
+        updatedAt: utcNow(),
+      };
+      await enqueueTaskRecord(inProgressRecord, {
+        stage: 'followup',
+        eventMessage: 'task re-enqueued for provider reconciliation',
+        delaySeconds,
+      });
+      return;
+    }
+
+    if (normalizedStatus === 'rejected') {
+      const finishedAt = utcNow();
+      const detail = buildTaskFailureDetail(new TaskRejectedError(String(status.error || 'Stephen render rejected'), 'provider_rejected'));
+      await taskStore.save({
+        ...record,
+        requestPayload: requestPayloadWithProvider,
+        status: 'rejected',
+        progress: null,
+        eta: null,
+        message: String(status.error || 'Stephen render rejected'),
+        errorCode: 'provider_rejected',
+        resultPayload: detail,
+        currentAttempt: context.attempts,
+        nextRunAt: null,
+        finishedAt,
+        workerName,
+        updatedAt: utcNow(),
+      });
+      await taskStore.appendEvent({
+        taskId,
+        eventType: 'rejected',
+        attemptNo: context.attempts,
+        workerName,
+        message: 'render_panel execution rejected',
+        detailJson: {
+          failure: detail,
+        },
+      });
+      await taskStore.saveAttempt({
+        taskId,
+        attemptNo: context.attempts,
+        status: 'rejected',
+        workerName,
+        startedAt,
+        finishedAt,
+        durationMs: Date.now() - new Date(startedAt).getTime(),
+        resultPayload: detail,
+        errorMessage: String(status.error || 'Stephen render rejected'),
+      });
+      return;
+    }
+
+    if (normalizedStatus === 'failed') {
+      const finishedAt = utcNow();
+      const detail = buildTaskFailureDetail(new Error(String(status.error || 'Stephen render failed')));
+      await taskStore.save({
+        ...record,
+        requestPayload: requestPayloadWithProvider,
+        status: 'failed',
+        progress: null,
+        eta: null,
+        message: String(status.error || 'Stephen render failed'),
+        errorCode: 'provider_render_failed',
+        resultPayload: detail,
+        currentAttempt: context.attempts,
+        nextRunAt: null,
+        finishedAt,
+        workerName,
+        updatedAt: utcNow(),
+      });
+      await taskStore.appendEvent({
+        taskId,
+        eventType: 'failed',
+        attemptNo: context.attempts,
+        workerName,
+        message: 'render_panel execution failed',
+        detailJson: {
+          failure: detail,
+          providerJobId: status.job_id,
+        },
+      });
+      await taskStore.saveAttempt({
+        taskId,
+        attemptNo: context.attempts,
+        status: 'failed',
+        workerName,
+        startedAt,
+        finishedAt,
+        durationMs: Date.now() - new Date(startedAt).getTime(),
+        resultPayload: detail,
+        errorMessage: String(status.error || 'Stephen render failed'),
+      });
+      return;
+    }
 
     await taskStore.save({
-      ...(await expectTask(taskId)),
+      ...record,
+      requestPayload: requestPayloadWithProvider,
       status: 'running',
       progress: 70,
       eta: null,
@@ -172,12 +261,9 @@ export async function handleRenderPanelExecute(
       updatedAt: utcNow(),
     });
 
-    const renderedImage = await downloadStephenRenderImage(terminalStatus);
-    const uploadedAsset = await uploadRenderAsset(payload.projectId, {
-      buffer: renderedImage.buffer,
-      contentType: renderedImage.contentType,
-      filenameHint: renderedImage.filename,
-    });
+    const uploadedAsset = await finalizeStephenImageWorkflow(payload.projectId, status);
+    const projectContext = await loadStoryboardProjectContextOrReject(payload);
+
     await taskStore.appendEvent({
       taskId,
       eventType: 'asset_uploaded',
@@ -193,6 +279,7 @@ export async function handleRenderPanelExecute(
 
     await taskStore.save({
       ...(await expectTask(taskId)),
+      requestPayload: requestPayloadWithProvider,
       status: 'running',
       progress: 90,
       eta: null,
@@ -203,7 +290,7 @@ export async function handleRenderPanelExecute(
       updatedAt: utcNow(),
     });
 
-    await writeStoryboardOutputSidecar(payload, {
+    const metadataPath = await writeStoryboardOutputSidecar(payload, {
       task_id: taskId,
       task_type: 'render_panel',
       workflow: payload.workflow.id,
@@ -212,43 +299,42 @@ export async function handleRenderPanelExecute(
       seed: payload.seed,
       source_image_uri: payload.inputs.imageAssetUri,
       extra_params: payload.extraParams,
+      note: payload.prompt.text,
       provider: {
         name: 'stephen_render',
-        job_id: String(terminalStatus.job_id || ''),
+        job_id: String(status.job_id || ''),
         workflow: payload.workflow.providerWorkflowId,
       },
       created_at: utcNow(),
-    }).catch((error: unknown) => {
-      if (error instanceof Error && error.message.includes('Shot storyboard directory is missing')) {
-        throw new TaskRejectedError(error.message, 'storyboard_target_missing');
-      }
-      throw error;
-    });
+    }, projectContext);
+
     await taskStore.appendEvent({
       taskId,
       eventType: 'metadata_written',
       attemptNo: context.attempts,
       workerName,
-      message: 'storyboard outputs metadata written',
+      message: PLATFORM_API_ENABLED ? 'PACE artifact metadata written' : 'storyboard outputs metadata written',
       detailJson: {
         panelId: payload.panel.panelId,
         sceneId: payload.panel.sceneId,
         shotId: payload.panel.shotId,
+        metadataPath,
       },
     });
 
     const result = {
-      panel_id: payload.panel.panelId,
+      panelId: payload.panel.panelId,
       project: payload.projectId,
       workflow: payload.workflow.id,
       backend: payload.workflow.backend,
       filename: uploadedAsset.filename,
-      render_uri: uploadedAsset.assetUri,
+      renderUri: uploadedAsset.assetUri,
       seed: payload.seed,
       meta: {
-        providerJobId: terminalStatus.job_id,
+        providerJobId: status.job_id,
         providerWorkflow: payload.workflow.providerWorkflowId,
         resolvedBaseModel: payload.workflow.baseModel,
+        metadataPath,
       },
     };
 
@@ -261,6 +347,7 @@ export async function handleRenderPanelExecute(
       errorCode: null,
       resultPayload: result,
       currentAttempt: context.attempts,
+      nextRunAt: null,
       finishedAt: utcNow(),
       workerName,
       updatedAt: utcNow(),
@@ -269,13 +356,13 @@ export async function handleRenderPanelExecute(
       taskId,
       eventType: 'succeeded',
       attemptNo: context.attempts,
-      workerName,
-      message: 'render_panel execution succeeded',
-      detailJson: {
-        providerJobId: terminalStatus.job_id,
+        workerName,
+        message: 'render_panel execution succeeded',
+        detailJson: {
+        providerJobId: status.job_id,
         renderUri: uploadedAsset.assetUri,
-      },
-    });
+        },
+      });
     await taskStore.saveAttempt({
       taskId,
       attemptNo: context.attempts,
@@ -301,6 +388,7 @@ export async function handleRenderPanelExecute(
           errorCode: error.code,
           resultPayload: failureDetail,
           currentAttempt: context.attempts,
+          nextRunAt: null,
           finishedAt,
           workerName,
           updatedAt: utcNow(),
@@ -422,66 +510,11 @@ export async function handleTaskExecute(
   await handler(envelope, context);
 }
 
-async function downloadSourceImage(payload: NormalizedRenderPanelPayload) {
-  try {
-    return await downloadAsset(payload.projectId, payload.inputs.imageAssetUri || '');
-  } catch (error: any) {
-    const message = String(error?.message || error || '');
-    if (error?.name === 'NoSuchKey' || message.includes('NoSuchKey') || message.includes('The specified key does not exist')) {
-      throw new TaskRejectedError(`source image asset does not exist: ${payload.inputs.imageAssetUri}`, 'source_asset_missing');
-    }
-    throw error;
-  }
-}
-
-async function expectTask(taskId: string) {
-  const record = await taskStore.get(taskId);
-  if (!record) {
-    throw new Error(`Task not found: ${taskId}`);
-  }
-  return record;
-}
-
-function progressForProviderStatus(status: string): number {
-  switch (status) {
-    case 'submitted':
-      return 20;
-    case 'queued':
-      return 25;
-    case 'running':
-      return 45;
-    case 'done':
-      return 65;
-    default:
-      return 30;
-  }
-}
-
-function normalizeWorkerName(): string {
-  const normalized = String(WORKER_NAME || '').trim();
-  return normalized || `${os.hostname()}:${process.pid}`;
-}
-
-function buildTaskFailureDetail(error: unknown): Record<string, unknown> {
-  if (error instanceof TaskRejectedError) {
-    return {
-      errorName: error.name,
-      code: error.code,
-      message: error.message,
-    };
-  }
-
-  return {
-    errorName: error instanceof Error ? error.name : 'Error',
-    message: error instanceof Error ? error.message : String(error),
-  };
-}
-
 export function supportsConsumerKey(consumerKey: string): boolean {
   return Boolean(CONSUMER_HANDLERS[String(consumerKey || '').trim()]);
 }
 
-function getConsumerHandler(consumerKey: string): typeof handleRenderPanelExecute {
+function getConsumerHandler(consumerKey: string): ConsumerHandler {
   const normalized = String(consumerKey || '').trim();
   const handler = CONSUMER_HANDLERS[normalized];
   if (!handler) {
@@ -491,29 +524,21 @@ function getConsumerHandler(consumerKey: string): typeof handleRenderPanelExecut
 }
 
 function defaultConsumerKeyForTaskType(taskType: string): string {
-  if (String(taskType || '').trim() === 'render_panel') {
+  const normalized = String(taskType || '').trim();
+  if (normalized === RENDER_PANEL_TASK_TYPE) {
     return RENDER_PANEL_CONSUMER_KEY;
+  }
+  if (normalized === REPLACE_PROP_PANEL_TASK_TYPE) {
+    return REPLACE_PROP_PANEL_CONSUMER_KEY;
+  }
+  if (isBlenderTaskType(normalized)) {
+    return BLENDER_CONSUMER_KEY;
   }
   return '';
 }
 
-function extractProjectRoot(requestPayload: Record<string, unknown>): string {
-  const meta = requestPayload?._taskRuntime;
-  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
-    const projectRoot = String((meta as Record<string, unknown>).projectRoot || '').trim();
-    if (projectRoot) {
-      return projectRoot;
-    }
-  }
-
-  const legacyProjectRoot = String(requestPayload.projectRoot || '').trim();
-  if (legacyProjectRoot) {
-    return legacyProjectRoot;
-  }
-
-  throw new Error('request payload is missing _taskRuntime.projectRoot');
-}
-
-const CONSUMER_HANDLERS: Record<string, typeof handleRenderPanelExecute> = {
+const CONSUMER_HANDLERS: Record<string, ConsumerHandler> = {
+  [BLENDER_CONSUMER_KEY]: handleBlenderExecute,
   [RENDER_PANEL_CONSUMER_KEY]: handleRenderPanelExecute,
+  [REPLACE_PROP_PANEL_CONSUMER_KEY]: handleReplacePropPanelExecute,
 };

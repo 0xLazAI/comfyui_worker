@@ -1,26 +1,45 @@
 import {
+  PROVIDER_POLL_INTERVAL_SECONDS,
+  PROJECTS_ROOT,
+  PLATFORM_API_ENABLED,
   TASK_BACKOFF_SECONDS,
-  TASK_JOB_NAME,
   TASK_MAX_ATTEMPTS,
-  TASK_QUEUE_NAME,
   TASK_TIMEOUT_SECONDS,
 } from '../infra/constants.js';
 import { ValidationError } from '../infra/HttpError.js';
 import { currentRequestId } from '../infra/logger.js';
-import { createQueueJobEnvelope } from '../queue/types.js';
-import { uploadSourceImageAsset } from '../render/assetStore.js';
-import { normalizeProjectRoot } from '../render/payload.js';
+import { uploadSourceImageAsset, uploadWorkerAsset } from '../render/assetStore.js';
+import { buildRenderPanelStephenSubmitBody, buildReplacePropStephenSubmitBody } from '../render/stephenWorkflowBodies.js';
+import { submitStephenImageWorkflow } from '../render/stephenWorkflowExecution.js';
+import { normalizeProjectRoot, hydrateRenderPanelPayload } from '../render/payload.js';
+import { hydrateReplacePropPanelPayload } from '../render/replacePropPayload.js';
+import { extractProjectRoot, progressForProviderStatus } from './taskExecutionShared.js';
+import { attachStephenProviderRuntimeState, mergeStephenProviderRuntimeState } from './taskRuntime.js';
 import {
   attachTaskDefinitionBinding,
   normalizePayloadWithDefinition,
 } from '../taskDefinitions/definitionSchema.js';
 import { taskTypeDefinitionStore } from '../taskDefinitions/taskTypeDefinitionStore.js';
 import { TASK_RUNTIME_META_KEY } from '../taskDefinitions/types.js';
+import { enqueueTaskRecord } from './taskScheduler.js';
 import { taskStore } from './taskStore.js';
 import { supportsConsumerKey } from './taskExecution.js';
-import { getTaskQueueDriver } from './taskQueue.js';
-import type { PublicTaskResponse, SubmitTaskInput, WorkerTaskRecord } from './types.js';
-import { mapWorkerTaskStatusToPublicStatus, toPublicTaskResponse, utcNow } from './types.js';
+import type {
+  PublicTaskResponse,
+  SubmitTaskInput,
+  TaskEventResponse,
+  TaskObservationResponse,
+  WorkerTaskRecord,
+} from './types.js';
+import {
+  mapWorkerTaskStatusToPublicStatus,
+  toPublicTaskResponse,
+  toTaskEventResponse,
+  toTaskObservationResponse,
+  utcNow,
+} from './types.js';
+import { ProviderRequestError, TaskRejectedError } from '../render/errors.js';
+import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
 
 export async function submitTask(input: SubmitTaskInput): Promise<{
   accepted: boolean;
@@ -48,11 +67,14 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
     throw new ValidationError(`unsupported consumer_key for task_type ${input.taskType}: ${consumerKey}`);
   }
 
-  const normalizedProjectRoot = normalizeProjectRoot(input.projectRoot);
+  const normalizedProjectRoot = PLATFORM_API_ENABLED
+    ? ''
+    : normalizeProjectRoot(`${PROJECTS_ROOT.replace(/\/+$/, '')}/${input.projectId}`);
   const payloadWithSourceImage = await attachUploadedSourceImage(input.projectId, input.payload, input.sourceImageUpload);
+  const payloadWithUploads = await attachUploadedBaseGlb(input.projectId, payloadWithSourceImage, input.baseGlbUpload);
   const payload = attachRuntimeMetadata(
     attachTaskDefinitionBinding(
-      normalizePayloadWithDefinition(structuredClone(payloadWithSourceImage), definition.definitionJson),
+      normalizePayloadWithDefinition(structuredClone(payloadWithUploads), definition.definitionJson),
       {
         definitionId: definition.id,
         version: definition.version,
@@ -81,9 +103,11 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
     createdAt: now,
     updatedAt: now,
     currentAttempt: 0,
-    maxAttempts: TASK_MAX_ATTEMPTS,
-    backoffSeconds: [...TASK_BACKOFF_SECONDS],
-    timeoutSeconds: TASK_TIMEOUT_SECONDS,
+    maxAttempts: definition.definitionJson.execution?.max_attempts ?? TASK_MAX_ATTEMPTS,
+    backoffSeconds: definition.definitionJson.execution?.backoff_seconds
+      ? [...definition.definitionJson.execution.backoff_seconds]
+      : [...TASK_BACKOFF_SECONDS],
+    timeoutSeconds: definition.definitionJson.execution?.timeout_seconds ?? TASK_TIMEOUT_SECONDS,
     requestId: input.requestId ?? currentRequestId() ?? null,
     dedupeKey: input.dedupeKey ?? null,
     nextRunAt: null,
@@ -103,25 +127,84 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
     };
   }
 
-  await publishTaskToQueue(record, {
-    stage: 'enqueue',
-    eventMessage: 'task enqueued',
-    failureMessage: 'task enqueue failed',
-  });
+  if (!requiresStephenSubmission(record.taskType)) {
+    try {
+      await enqueueTaskRecord(
+        {
+          ...record,
+          status: 'queued',
+          progress: 0,
+          eta: null,
+          message: 'queued',
+          errorCode: null,
+          finishedAt: null,
+          nextRunAt: null,
+        },
+        {
+          stage: 'enqueue',
+          eventMessage: 'task enqueued',
+        },
+      );
+    } catch (error: any) {
+      const failedRecord = await markSubmitStageFailure(record, error, {
+        stage: 'initial_enqueue',
+        message: 'initial task enqueue failed',
+      });
+      return {
+        accepted: true,
+        task_id: input.taskId,
+        status: mapWorkerTaskStatusToPublicStatus(failedRecord.status),
+        status_url: `/tasks/${input.taskId}`,
+      };
+    }
+    return {
+      accepted: true,
+      task_id: input.taskId,
+      status: 'queued',
+      status_url: `/tasks/${input.taskId}`,
+    };
+  }
+
+  const submitOutcome = await submitProviderJob(record);
+  if (submitOutcome.kind === 'rejected' || submitOutcome.kind === 'failed') {
+    return {
+      accepted: true,
+      task_id: input.taskId,
+      status: mapWorkerTaskStatusToPublicStatus(submitOutcome.record.status),
+      status_url: `/tasks/${input.taskId}`,
+    };
+  }
+
+  try {
+    await enqueueTaskRecord(submitOutcome.record, {
+      stage: 'enqueue',
+      eventMessage: 'task enqueued for provider reconciliation',
+      delaySeconds: PROVIDER_POLL_INTERVAL_SECONDS,
+    });
+  } catch (error: any) {
+    const failedRecord = await markSubmitStageFailure(submitOutcome.record, error, {
+      stage: 'provider_followup_enqueue',
+      message: 'provider submitted but reconciliation enqueue failed',
+    });
+    return {
+      accepted: true,
+      task_id: input.taskId,
+      status: mapWorkerTaskStatusToPublicStatus(failedRecord.status),
+      status_url: `/tasks/${input.taskId}`,
+    };
+  }
 
   return {
     accepted: true,
     task_id: input.taskId,
-    status: 'queued',
+    status: mapWorkerTaskStatusToPublicStatus(submitOutcome.record.status),
     status_url: `/tasks/${input.taskId}`,
   };
 }
 
 function attachRuntimeMetadata(payload: Record<string, unknown>, projectRoot: string): Record<string, unknown> {
   const normalized = structuredClone(payload);
-  normalized[TASK_RUNTIME_META_KEY] = {
-    projectRoot,
-  };
+  normalized[TASK_RUNTIME_META_KEY] = projectRoot ? { projectRoot } : {};
   return normalized;
 }
 
@@ -153,6 +236,46 @@ async function attachUploadedSourceImage(
   return normalized;
 }
 
+async function attachUploadedBaseGlb(
+  projectId: string,
+  payload: Record<string, unknown>,
+  baseGlbUpload: SubmitTaskInput['baseGlbUpload'],
+): Promise<Record<string, unknown>> {
+  if (!baseGlbUpload) {
+    return payload;
+  }
+
+  const normalized = structuredClone(payload || {});
+  const existingAssetUri = readExistingBaseGlbAssetUri(normalized);
+  if (existingAssetUri) {
+    throw new ValidationError('payload.inputs.base_glb.assetUri cannot be provided together with base_glb upload');
+  }
+
+  const uploaded = await uploadWorkerAsset(projectId, 'uploads', {
+    buffer: baseGlbUpload.buffer,
+    contentType: baseGlbUpload.contentType || undefined,
+    filenameHint: baseGlbUpload.filename || undefined,
+  });
+
+  const inputs = ensureObjectField(normalized, 'inputs');
+  const baseGlb = ensureObjectField(inputs, 'base_glb');
+  baseGlb.assetUri = uploaded.assetUri;
+
+  return normalized;
+}
+
+function readExistingBaseGlbAssetUri(payload: Record<string, unknown>): string {
+  const inputs = payload.inputs;
+  if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) {
+    return '';
+  }
+  const baseGlb = (inputs as Record<string, unknown>).base_glb;
+  if (!baseGlb || typeof baseGlb !== 'object' || Array.isArray(baseGlb)) {
+    return '';
+  }
+  return String((baseGlb as Record<string, unknown>).assetUri || '').trim();
+}
+
 function readExistingInputAssetUri(payload: Record<string, unknown>): string {
   const inputs = payload.inputs;
   if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) {
@@ -178,81 +301,275 @@ function ensureObjectField(target: Record<string, unknown>, key: string): Record
   return target[key] as Record<string, unknown>;
 }
 
+async function markSubmitStageFailure(
+  record: WorkerTaskRecord,
+  error: unknown,
+  options: {
+    stage: 'initial_enqueue' | 'provider_followup_enqueue';
+    message: string;
+  },
+): Promise<WorkerTaskRecord> {
+  const normalizedError = normalizeSubmitStageError(error);
+  const providerState =
+    options.stage === 'provider_followup_enqueue'
+      ? extractProviderState(record.requestPayload)
+      : null;
+
+  const failedRecord: WorkerTaskRecord = {
+    ...record,
+    status: 'failed',
+    queuePublishStatus: 'publish_failed',
+    queuePublishError: normalizedError.message,
+    progress: null,
+    eta: null,
+    message: options.message,
+    errorCode: 'queue_publish_failed',
+    resultPayload: {
+      errorName: normalizedError.name,
+      message: normalizedError.message,
+      stage: options.stage,
+      ...(providerState ? {
+        providerJobId: providerState.jobId,
+        providerPromptId: providerState.promptId || null,
+        providerStatusUrl: providerState.statusUrl || null,
+      } : {}),
+    },
+    nextRunAt: null,
+    finishedAt: utcNow(),
+    updatedAt: utcNow(),
+  };
+
+  await taskStore.save(failedRecord);
+  await taskStore.appendEvent({
+    taskId: record.taskId,
+    eventType: 'failed',
+    message: options.message,
+    detailJson: {
+      stage: options.stage,
+      errorName: normalizedError.name,
+      message: normalizedError.message,
+      ...(providerState ? {
+        providerJobId: providerState.jobId,
+        providerPromptId: providerState.promptId || null,
+        providerStatusUrl: providerState.statusUrl || null,
+      } : {}),
+    },
+  });
+  return failedRecord;
+}
+
+function normalizeSubmitStageError(error: unknown): { name: string; message: string } {
+  if (error instanceof Error) {
+    return {
+      name: error.name || 'Error',
+      message: error.message || 'unknown error',
+    };
+  }
+  return {
+    name: 'Error',
+    message: String(error || 'unknown error'),
+  };
+}
+
+function extractProviderState(payload: Record<string, unknown>): {
+  jobId: string;
+  promptId?: string | null;
+  statusUrl?: string | null;
+} | null {
+  const runtimeMeta = payload[TASK_RUNTIME_META_KEY];
+  if (!runtimeMeta || typeof runtimeMeta !== 'object' || Array.isArray(runtimeMeta)) {
+    return null;
+  }
+  const provider = (runtimeMeta as Record<string, unknown>).provider;
+  if (!provider || typeof provider !== 'object' || Array.isArray(provider)) {
+    return null;
+  }
+  const providerMap = provider as Record<string, unknown>;
+  const jobId = String(providerMap.jobId || '').trim();
+  if (!jobId) {
+    return null;
+  }
+  const promptId = String(providerMap.promptId || '').trim() || null;
+  const statusUrl = String(providerMap.statusUrl || '').trim() || null;
+  return {
+    jobId,
+    promptId,
+    statusUrl,
+  };
+}
+
 export async function getTaskResponse(taskId: string): Promise<PublicTaskResponse | null> {
   const task = await taskStore.get(taskId);
   return task ? toPublicTaskResponse(task) : null;
 }
 
-async function publishTaskToQueue(
-  record: WorkerTaskRecord,
-  options: {
-    stage: 'enqueue' | 'republish';
-    eventMessage: string;
-    failureMessage: string;
-  },
-): Promise<void> {
-  const driver = await getTaskQueueDriver();
+function requiresStephenSubmission(taskType: string): boolean {
+  return taskType === RENDER_PANEL_TASK_TYPE || taskType === REPLACE_PROP_PANEL_TASK_TYPE;
+}
 
+export async function listTaskObservations(filters?: {
+  limit?: number;
+  taskType?: string;
+}): Promise<TaskObservationResponse[]> {
+  const tasks = await taskStore.list({
+    limit: filters?.limit,
+    taskType: filters?.taskType,
+  });
+  return tasks.map(toTaskObservationResponse);
+}
+
+export async function listTaskEvents(taskId: string): Promise<TaskEventResponse[] | null> {
+  const task = await taskStore.get(taskId);
+  if (!task) {
+    return null;
+  }
+  const events = await taskStore.listEvents(taskId);
+  return events.map(toTaskEventResponse);
+}
+
+async function submitProviderJob(
+  record: WorkerTaskRecord,
+): Promise<
+  | { kind: 'submitted'; record: WorkerTaskRecord }
+  | { kind: 'rejected'; record: WorkerTaskRecord }
+  | { kind: 'failed'; record: WorkerTaskRecord }
+> {
   try {
-    await driver.enqueue(
-      TASK_QUEUE_NAME,
-      createQueueJobEnvelope(
-        TASK_QUEUE_NAME,
-        TASK_JOB_NAME,
-        { taskId: record.taskId },
-        {
-          id: `job_${record.taskId}`,
-          maxAttempts: record.maxAttempts,
-          backoff: record.backoffSeconds,
-          timeout: record.timeoutSeconds,
-        },
-      ),
-    );
-    await taskStore.save({
+    const submittedAt = utcNow();
+    const projectRoot = extractProjectRoot(record.requestPayload);
+    const submitted = await submitStephenTask(record, projectRoot);
+    const provider = mergeStephenProviderRuntimeState(null, submitted, { submittedAt });
+    const status = provider.lastStatus || 'submitted';
+    const nextRunAt = new Date(Date.now() + PROVIDER_POLL_INTERVAL_SECONDS * 1000).toISOString();
+    const updatedRecord: WorkerTaskRecord = {
       ...record,
-      status: 'queued',
-      queuePublishStatus: 'published',
-      queuePublishedAt: utcNow(),
-      queuePublishError: null,
-      progress: 0,
-      eta: null,
-      message: 'queued',
+      requestPayload: attachStephenProviderRuntimeState(record.requestPayload, provider),
+      status: 'running',
+      progress: progressForProviderStatus(status),
+      eta: PROVIDER_POLL_INTERVAL_SECONDS,
+      message: `provider ${status}`,
       errorCode: null,
-      finishedAt: null,
-      nextRunAt: null,
+      nextRunAt,
       updatedAt: utcNow(),
-    });
+    };
+
+    await taskStore.save(updatedRecord);
     await taskStore.appendEvent({
       taskId: record.taskId,
-      eventType: 'enqueued',
-      message: options.eventMessage,
+      eventType: 'provider_submitted',
+      message: 'provider job submitted',
       detailJson: {
-        queueName: TASK_QUEUE_NAME,
-        stage: options.stage,
+        providerJobId: provider.jobId,
+        status,
+        statusUrl: provider.statusUrl,
+        promptId: provider.promptId,
+        workerName: provider.workerName,
+        workerUrl: provider.workerUrl,
+        workflow: provider.workflow,
       },
     });
+
+    return {
+      kind: 'submitted',
+      record: updatedRecord,
+    };
   } catch (error: any) {
-    const errorMessage = error?.message || 'Failed to enqueue worker task';
-    await taskStore.save({
+    if (error instanceof TaskRejectedError) {
+      const rejectedRecord: WorkerTaskRecord = {
+        ...record,
+        status: 'rejected',
+        progress: null,
+        eta: null,
+        message: error.message,
+        errorCode: error.code,
+        resultPayload: {
+          errorName: error.name,
+          code: error.code,
+          message: error.message,
+        },
+        finishedAt: utcNow(),
+        updatedAt: utcNow(),
+      };
+      await taskStore.save(rejectedRecord);
+      await taskStore.appendEvent({
+        taskId: record.taskId,
+        eventType: 'rejected',
+        message: 'provider submit rejected',
+        detailJson: {
+          code: error.code,
+          message: error.message,
+        },
+      });
+      return {
+        kind: 'rejected',
+        record: rejectedRecord,
+      };
+    }
+
+    const failedRecord: WorkerTaskRecord = {
       ...record,
       status: 'failed',
-      queuePublishStatus: 'publish_failed',
-      queuePublishError: errorMessage,
       progress: null,
       eta: null,
-      message: errorMessage,
-      errorCode: 'queue_publish_failed',
+      message: error?.message || 'provider submit failed',
+      errorCode: error instanceof ProviderRequestError ? error.code : 'provider_submit_failed',
+      resultPayload: {
+        errorName: error instanceof Error ? error.name : 'Error',
+        message: error instanceof Error ? error.message : String(error),
+      },
       finishedAt: utcNow(),
       updatedAt: utcNow(),
-    }).catch(() => undefined);
+    };
+    await taskStore.save(failedRecord);
     await taskStore.appendEvent({
       taskId: record.taskId,
       eventType: 'failed',
-      message: options.failureMessage,
+      message: 'provider submit failed',
       detailJson: {
-        stage: options.stage,
+        message: error?.message || 'provider submit failed',
       },
-    }).catch(() => undefined);
-    throw error;
+    });
+    return {
+      kind: 'failed',
+      record: failedRecord,
+    };
   }
+}
+
+async function submitStephenTask(record: WorkerTaskRecord, projectRoot: string) {
+  if (record.taskType === RENDER_PANEL_TASK_TYPE) {
+    const payload = hydrateRenderPanelPayload(structuredClone(record.requestPayload), {
+      taskId: record.taskId,
+      projectId: record.projectId,
+      projectRoot,
+    });
+    const submission = await submitStephenImageWorkflow({
+      target: {
+        projectId: payload.projectId,
+        panel: payload.panel,
+      },
+      sourceImageAssetUri: payload.inputs.imageAssetUri || '',
+      buildSubmitBody: (sourceImageBase64) => buildRenderPanelStephenSubmitBody(payload, sourceImageBase64),
+    });
+    return submission.submitted;
+  }
+
+  if (record.taskType === REPLACE_PROP_PANEL_TASK_TYPE) {
+    const payload = hydrateReplacePropPanelPayload(structuredClone(record.requestPayload), {
+      taskId: record.taskId,
+      projectId: record.projectId,
+      projectRoot,
+    });
+    const submission = await submitStephenImageWorkflow({
+      target: {
+        projectId: payload.projectId,
+        panel: payload.panel,
+      },
+      sourceImageAssetUri: payload.inputs.imageAssetUri || '',
+      buildSubmitBody: (sourceImageBase64) => buildReplacePropStephenSubmitBody(payload, sourceImageBase64),
+    });
+    return submission.submitted;
+  }
+
+  throw new ValidationError(`provider submit is not supported for task_type: ${record.taskType}`);
 }

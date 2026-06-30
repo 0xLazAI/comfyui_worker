@@ -1,26 +1,71 @@
-export type TaskDefinitionFieldType = 'string' | 'number' | 'integer' | 'boolean';
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 
-export interface TaskDefinitionFieldRule {
-  type: TaskDefinitionFieldType;
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+
+export type TaskDefinitionFieldType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'json';
+
+interface TaskDefinitionFieldRuleBase<TType extends TaskDefinitionFieldType, TDefault> {
+  type: TType;
   required?: boolean;
-  default?: string | number | boolean;
+  enum?: Array<string | number | boolean>;
   description?: string;
+  default?: TDefault;
+}
+
+interface TaskDefinitionNumericBounds {
   minimum?: number;
   maximum?: number;
 }
+
+export interface TaskDefinitionStringFieldRule extends TaskDefinitionFieldRuleBase<'string', string>, TaskDefinitionNumericBounds {}
+
+export interface TaskDefinitionNumberFieldRule extends TaskDefinitionFieldRuleBase<'number', number>, TaskDefinitionNumericBounds {}
+
+export interface TaskDefinitionIntegerFieldRule extends TaskDefinitionFieldRuleBase<'integer', number>, TaskDefinitionNumericBounds {}
+
+export interface TaskDefinitionBooleanFieldRule extends TaskDefinitionFieldRuleBase<'boolean', boolean>, TaskDefinitionNumericBounds {}
+
+export interface TaskDefinitionObjectFieldRule extends TaskDefinitionFieldRuleBase<'object', JsonObject> {
+  minimum?: never;
+  maximum?: never;
+}
+
+export interface TaskDefinitionJsonFieldRule extends TaskDefinitionFieldRuleBase<'json', JsonValue> {
+  minimum?: never;
+  maximum?: never;
+}
+
+export type TaskDefinitionFieldRule =
+  | TaskDefinitionStringFieldRule
+  | TaskDefinitionNumberFieldRule
+  | TaskDefinitionIntegerFieldRule
+  | TaskDefinitionBooleanFieldRule
+  | TaskDefinitionObjectFieldRule
+  | TaskDefinitionJsonFieldRule;
 
 export interface TaskDefinitionPayloadRuleSet {
   allow_unknown_fields?: boolean;
   fields: Record<string, TaskDefinitionFieldRule>;
 }
 
+export interface TaskDefinitionExecution {
+  timeout_seconds?: number;
+  max_attempts?: number;
+  backoff_seconds?: number[];
+}
+
 export interface TaskDefinitionJson {
   consumer_key: string;
+  execution?: TaskDefinitionExecution;
   payload: TaskDefinitionPayloadRuleSet;
 }
 
 export interface TaskTypeDefinitionRecord {
   id: string;
+  workerName: string;
   taskType: string;
   version: number;
   enabled: boolean;
@@ -33,6 +78,7 @@ export interface TaskTypeDefinitionRecord {
 }
 
 export interface TaskTypeDefinitionCreateInput {
+  workerName: string;
   taskType: string;
   version: number;
   enabled: boolean;
@@ -42,6 +88,7 @@ export interface TaskTypeDefinitionCreateInput {
 }
 
 export interface TaskTypeDefinitionUpdateInput {
+  workerName?: string;
   taskType?: string;
   version?: number;
   enabled?: boolean;

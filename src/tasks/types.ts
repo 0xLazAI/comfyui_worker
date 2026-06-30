@@ -16,7 +16,18 @@ export type WorkerTaskQueuePublishStatus = 'pending' | 'published' | 'publish_fa
 export type WorkerTaskEventType =
   | 'accepted'
   | 'enqueued'
+  | 'dispatched_local'
   | 'started'
+  | 'agent_generated'
+  | 'scene_failed'
+  | 'shot_failed'
+  | 'pace_written'
+  | 'script_repair_started'
+  | 'script_repaired'
+  | 'preview_reviewed'
+  | 'preview_review_skipped'
+  | 'preview_fix_applied'
+  | 'preview_fix_skipped'
   | 'provider_submitted'
   | 'provider_polled'
   | 'asset_uploaded'
@@ -85,13 +96,38 @@ export interface PublicTaskResponse {
   updated_at: string;
 }
 
+export interface TaskObservationResponse extends PublicTaskResponse {
+  finished_at: string | null;
+  project_id: string;
+  request_payload: Record<string, unknown>;
+  started_at: string | null;
+  task_type: string;
+  worker_name: string | null;
+}
+
+export interface TaskEventResponse {
+  attempt_no: number | null;
+  created_at: string;
+  detail: Record<string, unknown>;
+  event_seq: number;
+  event_type: WorkerTaskEventType;
+  id: string;
+  message: string | null;
+  task_id: string;
+  worker_name: string | null;
+}
+
 export interface SubmitTaskInput {
   taskId: string;
   taskType: string;
   projectId: string;
-  projectRoot: string;
   payload: Record<string, unknown>;
   sourceImageUpload?: {
+    buffer: Buffer;
+    contentType?: string | null;
+    filename?: string | null;
+  } | null;
+  baseGlbUpload?: {
     buffer: Buffer;
     contentType?: string | null;
     filename?: string | null;
@@ -161,6 +197,32 @@ export function toPublicTaskResponse(record: WorkerTaskRecord): PublicTaskRespon
     result: structuredClone(record.resultPayload || {}),
     created_at: record.createdAt,
     updated_at: record.updatedAt,
+  };
+}
+
+export function toTaskObservationResponse(record: WorkerTaskRecord): TaskObservationResponse {
+  return {
+    ...toPublicTaskResponse(record),
+    finished_at: record.finishedAt,
+    project_id: record.projectId,
+    request_payload: structuredClone(record.requestPayload || {}),
+    started_at: record.startedAt,
+    task_type: record.taskType,
+    worker_name: record.workerName,
+  };
+}
+
+export function toTaskEventResponse(record: WorkerTaskEventRecord): TaskEventResponse {
+  return {
+    attempt_no: record.attemptNo,
+    created_at: record.createdAt,
+    detail: structuredClone(record.detailJson || {}),
+    event_seq: record.eventSeq,
+    event_type: record.eventType,
+    id: record.id,
+    message: record.message,
+    task_id: record.taskId,
+    worker_name: record.workerName,
   };
 }
 

@@ -1,7 +1,11 @@
-import { PROVIDER_POLL_INTERVAL_SECONDS, STEPHEN_RENDER_BASE_URL } from '../infra/constants.js';
+import { PROVIDER_POLL_INTERVAL_SECONDS, STEPHEN_RENDER_BASE_URL, STEPHEN_RENDER_PROJECT_ID } from '../infra/constants.js';
 import { ProviderRequestError, TaskRejectedError } from './errors.js';
-import type { NormalizedRenderPanelPayload } from './payload.js';
-import type { WorkflowDefinition } from './workflowCatalog.js';
+import type { ParsedPanelId } from './panelId.js';
+
+export interface StephenRenderTarget {
+  projectId: string;
+  panel: ParsedPanelId;
+}
 
 export interface StephenRenderStatus {
   job_id: string;
@@ -21,17 +25,15 @@ export interface StephenRenderStatus {
 }
 
 export async function submitStephenRender(
-  payload: NormalizedRenderPanelPayload,
-  workflow: WorkflowDefinition,
-  sourceImageBase64: string,
+  target: StephenRenderTarget,
+  body: Record<string, unknown>,
 ): Promise<StephenRenderStatus> {
   ensureBaseUrl();
+  const projectId = effectiveStephenProjectId(target.projectId);
   const submitUrl = new URL(
-    `/api/project/${encodeURIComponent(payload.projectId)}/scene/${encodeURIComponent(payload.panel.sceneId)}/shot/${encodeURIComponent(payload.panel.shotId)}/panel/${encodeURIComponent(payload.panel.panelNumber)}/render`,
+    `/api/project/${encodeURIComponent(projectId)}/scene/${encodeURIComponent(target.panel.providerSceneId)}/shot/${encodeURIComponent(target.panel.providerShotId)}/panel/${encodeURIComponent(target.panel.panelNumber)}/render`,
     STEPHEN_RENDER_BASE_URL,
   );
-
-  const body = buildSubmitBody(payload, workflow, sourceImageBase64);
   const response = await fetch(submitUrl, {
     method: 'POST',
     headers: {
@@ -57,36 +59,12 @@ export async function submitStephenRender(
 }
 
 export async function pollStephenRenderUntilTerminal(
-  payload: NormalizedRenderPanelPayload,
+  projectId: string,
   submitted: StephenRenderStatus,
   onUpdate?: (status: StephenRenderStatus) => Promise<void> | void,
 ): Promise<StephenRenderStatus> {
-  ensureBaseUrl();
-  const statusUrl = new URL(
-    submitted.status_url || `/api/project/${encodeURIComponent(payload.projectId)}/render/${encodeURIComponent(String(submitted.job_id || '').trim())}`,
-    STEPHEN_RENDER_BASE_URL,
-  );
-
   while (true) {
-    const response = await fetch(statusUrl, { method: 'GET' });
-    const data = await parseJsonResponse(response);
-
-    if (!response.ok) {
-      if (response.status >= 400 && response.status < 500) {
-        throw new TaskRejectedError(extractMessage(data, `Stephen status request rejected (${response.status})`), 'provider_status_rejected');
-      }
-      throw new ProviderRequestError(
-        extractMessage(data, `Stephen status request failed with HTTP ${response.status}`),
-        response.status,
-        'provider_status_failed',
-        data,
-      );
-    }
-
-    const status = data as StephenRenderStatus;
-    if (status.status_url === undefined) {
-      status.status_url = statusUrl.pathname;
-    }
+    const status = await getStephenRenderStatus(projectId, submitted);
     await onUpdate?.(status);
 
     if (status.status === 'done') {
@@ -101,6 +79,38 @@ export async function pollStephenRenderUntilTerminal(
 
     await sleep(PROVIDER_POLL_INTERVAL_SECONDS * 1000);
   }
+}
+
+export async function getStephenRenderStatus(
+  projectId: string,
+  reference: Pick<StephenRenderStatus, 'job_id' | 'status_url'>,
+): Promise<StephenRenderStatus> {
+  ensureBaseUrl();
+  const effectiveProjectId = effectiveStephenProjectId(projectId);
+  const statusUrl = new URL(
+    reference.status_url || `/api/project/${encodeURIComponent(effectiveProjectId)}/render/${encodeURIComponent(String(reference.job_id || '').trim())}`,
+    STEPHEN_RENDER_BASE_URL,
+  );
+  const response = await fetch(statusUrl, { method: 'GET' });
+  const data = await parseJsonResponse(response);
+
+  if (!response.ok) {
+    if (response.status >= 400 && response.status < 500) {
+      throw new TaskRejectedError(extractMessage(data, `Stephen status request rejected (${response.status})`), 'provider_status_rejected');
+    }
+    throw new ProviderRequestError(
+      extractMessage(data, `Stephen status request failed with HTTP ${response.status}`),
+      response.status,
+      'provider_status_failed',
+      data,
+    );
+  }
+
+  const status = data as StephenRenderStatus;
+  if (status.status_url === undefined) {
+    status.status_url = statusUrl.pathname;
+  }
+  return status;
 }
 
 export async function downloadStephenRenderImage(status: StephenRenderStatus): Promise<{
@@ -128,27 +138,6 @@ export async function downloadStephenRenderImage(status: StephenRenderStatus): P
   };
 }
 
-function buildSubmitBody(
-  payload: NormalizedRenderPanelPayload,
-  workflow: WorkflowDefinition,
-  sourceImageBase64: string,
-): Record<string, unknown> {
-  return {
-    project: payload.projectId,
-    workflow: workflow.providerWorkflowId,
-    backend: workflow.backend,
-    base_model: workflow.baseModel,
-    positive: payload.prompt.text,
-    negative: payload.prompt.negativeText,
-    seed: payload.seed,
-    inpaint: {
-      init_b64: sourceImageBase64,
-      denoise: payload.extraParams.denoise,
-      grow_mask: payload.extraParams.growMask,
-    },
-  };
-}
-
 async function parseJsonResponse(response: Response): Promise<Record<string, unknown>> {
   const text = await response.text();
   if (!text.trim()) {
@@ -170,6 +159,10 @@ function ensureBaseUrl(): void {
   if (!STEPHEN_RENDER_BASE_URL) {
     throw new Error('STEPHEN_RENDER_BASE_URL is required');
   }
+}
+
+function effectiveStephenProjectId(projectId: string): string {
+  return STEPHEN_RENDER_PROJECT_ID || String(projectId || '').trim();
 }
 
 async function sleep(ms: number): Promise<void> {

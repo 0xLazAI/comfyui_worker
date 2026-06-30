@@ -5,17 +5,25 @@
   "type": "module",
   "scripts": {
     "compile": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
     "start": "npm run compile && node ./dist/index.js",
     "server": "npm run compile && node ./dist/index.js",
-    "queue:worker": "npm run compile && node ./dist/queue/worker-cli.js"
+    "queue:worker": "npm run compile && node ./dist/queue/worker-cli.js",
+    "graphql:schema": "graphql-codegen --config codegen.schema.ts",
+    "graphql:operations": "node scripts/generateGraphqlOperations.mjs",
+    "graphql:codegen": "graphql-codegen --config codegen.ts",
+    "graphql:generate": "npm run graphql:schema && npm run graphql:operations && npm run graphql:codegen"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.921.0",
-    "@types/multer": "^2.1.0",
+    "@openai/codex-sdk": "0.138.0",
     "cls-rtracer": "^2.6.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "graphql": "^16.14.2",
+    "graphql-request": "^6.1.0",
     "multer": "^2.1.1",
     "pg": "^8.16.3",
     "redis": "^4.7.0",
@@ -24,10 +32,17 @@
     "winston": "^3.18.3"
   },
   "devDependencies": {
+    "@graphql-codegen/cli": "^5.0.7",
+    "@graphql-codegen/schema-ast": "^4.1.0",
+    "@graphql-codegen/typescript": "^4.1.6",
+    "@graphql-codegen/typescript-graphql-request": "^6.4.0",
+    "@graphql-codegen/typescript-operations": "^4.6.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.5",
+    "@types/multer": "^2.1.0",
     "@types/node": "^24.9.0",
     "@types/pg": "^8.15.5",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
   }
 }
