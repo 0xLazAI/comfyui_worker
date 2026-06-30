@@ -2,16 +2,17 @@
  * PAI Platform GraphQL SDK — runtime entry point.
  *
  * Binds the codegen-generated, fully-typed `getSdk` factory (generated/) to a
- * `graphql-request` client pointed at PAI_PLATFORM_GRAPH, so callers can invoke any
+ * `graphql-request` client pointed at the platform GraphQL endpoint (derived from
+ * PAI_PLATFORM_API_BASE as <base>/api/graphql/), so callers can invoke any
  * query/mutation with end-to-end types:
  *
  *   import { paiPlatformSdk } from '../platform/graphql/paiPlatformSdk.js';
  *   const { viewer_query } = paiPlatformSdk;
  *   const { viewer } = await viewer_query({ ... });
  *
- * The SDK is built lazily on first use (a Proxy), so merely importing this
- * module never throws when PAI_PLATFORM_GRAPH is unset — only an actual call does, with
- * a clear message. Auth reuses the same platform credentials as the REST client.
+ * The SDK is built lazily on first use (a Proxy), so merely importing this module
+ * never throws when the platform base is unset — only an actual call does, with a
+ * clear message. Auth reuses the same platform credentials as the REST client.
  *
  * Naming note: this file is intentionally per-source (`paiPlatform`), not a
  * generic `graphqlSdk`. A second GraphQL endpoint gets its own
@@ -30,7 +31,7 @@ export class PaiGraphqlConfigError extends Error {
 }
 
 export interface CreatePaiPlatformSdkOptions {
-  /** Override the endpoint (defaults to PAI_PLATFORM_GRAPH). */
+  /** Override the endpoint (defaults to the derived platform GraphQL endpoint). */
   endpoint?: string;
   /** Extra request headers merged over the credential-derived defaults. */
   headers?: Record<string, string>;
@@ -54,7 +55,7 @@ function buildHeaders(extra: Record<string, string> = {}): Record<string, string
 export function createPaiPlatformGraphqlClient(options: CreatePaiPlatformSdkOptions = {}): GraphQLClient {
   const endpoint = options.endpoint || PAI_PLATFORM_GRAPH;
   if (!endpoint) {
-    throw new PaiGraphqlConfigError('PAI_PLATFORM_GRAPH is not configured — set it in the environment before using the PAI Platform GraphQL SDK.');
+    throw new PaiGraphqlConfigError('PAI Platform GraphQL endpoint is not configured — set PAI_PLATFORM_API_BASE (the endpoint is derived as <base>/api/graphql/).');
   }
   return new GraphQLClient(endpoint, {
     headers: buildHeaders(options.headers),
@@ -71,7 +72,7 @@ export function createPaiPlatformSdk(options: CreatePaiPlatformSdkOptions = {}):
   return getSdk(client);
 }
 
-/** True when PAI_PLATFORM_GRAPH is set; lets callers gracefully skip GraphQL paths. */
+/** True when the platform GraphQL endpoint is configured; lets callers skip GraphQL paths. */
 export function isPaiGraphqlEnabled(): boolean {
   return PAI_PLATFORM_GRAPH_ENABLED;
 }

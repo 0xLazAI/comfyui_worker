@@ -10,9 +10,6 @@ export default defineConfig({
       // developer's .env, so the S3 asset path is exercised here and the platform-API
       // path by its own (mocked) tests.
       PAI_PLATFORM_API_BASE: '',
-      // The GraphQL SDK reads this; keep it set so the enabled/disabled tests are
-      // deterministic regardless of the developer's .env.
-      PAI_PLATFORM_GRAPH: 'https://pai-api-test.lazai.io/api/graphql/',
     },
     environment: 'node',
     include: ['src/**/*.test.ts'],

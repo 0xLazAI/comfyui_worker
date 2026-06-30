@@ -34,10 +34,11 @@ export const NODE_ENV = pick(process.env.NODE_ENV, 'development');
 export const PLATFORM_API_BASE = pick(process.env.PAI_PLATFORM_API_BASE);
 export const PLATFORM_API_KEY = pick(process.env.PAI_PLATFORM_API_KEY);
 export const PLATFORM_API_ENABLED = Boolean(PLATFORM_API_BASE);
-// PAI Platform GraphQL endpoint. Source of truth for codegen (schema pull +
-// typed SDK) and for the runtime GraphQL client. Keep the trailing slash the
-// server publishes. See docs/graphql-sdk.md.
-export const PAI_PLATFORM_GRAPH = pick(process.env.PAI_PLATFORM_GRAPH);
+// PAI Platform GraphQL endpoint — derived from the platform API base (same host),
+// so there is no separate env var. Used by codegen (schema pull + typed SDK) and the
+// runtime GraphQL client. Keeps the trailing slash the server publishes.
+// See docs/graphql-sdk.md.
+export const PAI_PLATFORM_GRAPH = PLATFORM_API_BASE ? `${PLATFORM_API_BASE.replace(/\/+$/, '')}/api/graphql/` : '';
 export const PAI_PLATFORM_GRAPH_ENABLED = Boolean(PAI_PLATFORM_GRAPH);
 export const PORT = integer(pick(process.env.PAI_WORKER_PORT, process.env.COMFYUI_WORKER_PORT, process.env.DEMO_WORKER_PORT, '8080'), 8080, 1);
 export const HOST = pick(process.env.PAI_WORKER_HOST, process.env.COMFYUI_WORKER_HOST, process.env.DEMO_WORKER_HOST, '0.0.0.0');

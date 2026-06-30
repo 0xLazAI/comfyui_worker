@@ -43,12 +43,13 @@ const result = await paiPlatformSdk.heartbeatWorker_mutation({
 
 | Env | Purpose |
 | --- | --- |
-| `PAI_PLATFORM_GRAPH` | GraphQL endpoint, e.g. `https://pai-api-test.lazai.io/api/graphql/`. Used by `graphql:schema` (codegen) **and** the runtime client. |
+| `PAI_PLATFORM_API_BASE` | Platform API base, e.g. `https://pai-api-test.lazai.io`. The GraphQL endpoint is **derived** from it as `<base>/api/graphql/` — there is no separate GraphQL env var. Used by `graphql:schema` (codegen) **and** the runtime client. |
 | `PAI_PLATFORM_API_KEY` | Sent as `x-api-key` (and bearer fallback), reusing the REST client's credentials. |
 | `PAI_PLATFORM_BEARER_TOKEN` | Sent as `Authorization: Bearer …`. |
 
-`PAI_PLATFORM_GRAPH` is read in [`src/infra/constants.ts`](../src/infra/constants.ts) as
-`PAI_PLATFORM_GRAPH` / `PAI_PLATFORM_GRAPH_ENABLED`. Keep the trailing slash the server publishes.
+The endpoint is derived in [`src/infra/constants.ts`](../src/infra/constants.ts) as
+`PAI_PLATFORM_GRAPH` / `PAI_PLATFORM_GRAPH_ENABLED` from `PLATFORM_API_BASE` (trailing
+slash preserved, matching what the server publishes).
 
 ## Pipeline & layout
 

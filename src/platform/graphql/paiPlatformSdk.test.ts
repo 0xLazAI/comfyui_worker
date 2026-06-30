@@ -8,9 +8,10 @@ import {
 } from './paiPlatformSdk.js';
 
 describe('paiPlatformSdk', () => {
-  it('reports enabled when PAI_PLATFORM_GRAPH is configured in the test env', () => {
-    // .env sets PAI_PLATFORM_GRAPH for local/test runs.
-    expect(isPaiGraphqlEnabled()).toBe(true);
+  it('derives disabled + throws a config error when the platform base is unset (test env)', () => {
+    // vitest sets PAI_PLATFORM_API_BASE='' so the derived GraphQL endpoint is empty.
+    expect(isPaiGraphqlEnabled()).toBe(false);
+    expect(() => createPaiPlatformGraphqlClient()).toThrow(PaiGraphqlConfigError);
   });
 
   it('builds a client bound to an explicit endpoint', () => {
