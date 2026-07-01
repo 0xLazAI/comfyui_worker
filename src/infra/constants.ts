@@ -34,6 +34,12 @@ export const NODE_ENV = pick(process.env.NODE_ENV, 'development');
 export const PLATFORM_API_BASE = pick(process.env.PAI_PLATFORM_API_BASE);
 export const PLATFORM_API_KEY = pick(process.env.PAI_PLATFORM_API_KEY);
 export const PLATFORM_API_ENABLED = Boolean(PLATFORM_API_BASE);
+// PAI Platform GraphQL endpoint — derived from the platform API base (same host),
+// so there is no separate env var. Used by codegen (schema pull + typed SDK) and the
+// runtime GraphQL client. Keeps the trailing slash the server publishes.
+// See docs/graphql-sdk.md.
+export const PAI_PLATFORM_GRAPH = PLATFORM_API_BASE ? `${PLATFORM_API_BASE.replace(/\/+$/, '')}/api/graphql/` : '';
+export const PAI_PLATFORM_GRAPH_ENABLED = Boolean(PAI_PLATFORM_GRAPH);
 export const PORT = integer(pick(process.env.PAI_WORKER_PORT, process.env.COMFYUI_WORKER_PORT, process.env.DEMO_WORKER_PORT, '8080'), 8080, 1);
 export const HOST = pick(process.env.PAI_WORKER_HOST, process.env.COMFYUI_WORKER_HOST, process.env.DEMO_WORKER_HOST, '0.0.0.0');
 export const WORKER_NAME = pick(process.env.PAI_WORKER_NAME, process.env.COMFYUI_WORKER_NAME, process.env.DEMO_WORKER_NAME, 'demo-worker');
@@ -80,6 +86,19 @@ export const PROVIDER_POLL_INTERVAL_SECONDS = integer(
 );
 export const STEPHEN_RENDER_BASE_URL = pick(process.env.STEPHEN_RENDER_BASE_URL);
 export const STEPHEN_RENDER_PROJECT_ID = 'kumarajiva';
+// Online PAILang blender runner (defaults to the Stephen render host, port 8911).
+export const PAI_BLENDER_ONLINE_BASE_URL = pick(process.env.PAI_BLENDER_ONLINE_BASE_URL, process.env.STEPHEN_RENDER_BASE_URL);
+// Runner TLS. The runner is reached over HTTPS; if it presents a private/self-signed
+// cert, point PAI_BLENDER_RUNNER_CA at the CA bundle (PEM path) to trust it securely.
+// PAI_BLENDER_RUNNER_INSECURE_TLS=true disables verification entirely — dev/self-signed
+// ONLY, scoped to the runner connection (not the whole process). CA pinning is preferred.
+export const PAI_BLENDER_RUNNER_CA = pick(process.env.PAI_BLENDER_RUNNER_CA);
+export const PAI_BLENDER_RUNNER_INSECURE_TLS = pick(process.env.PAI_BLENDER_RUNNER_INSECURE_TLS).toLowerCase() === 'true';
+// Per-job Blender wall-clock timeout sent to the runner. PAILang caps this at 600s.
+export const PAI_BLENDER_JOB_TIMEOUT_SECONDS = integer(pick(process.env.PAI_BLENDER_JOB_TIMEOUT_SECONDS, '600'), 600, 5);
+// Polling cadence/timeout against the PAILang job status endpoint.
+export const PAI_BLENDER_POLL_INTERVAL_SECONDS = integer(pick(process.env.PAI_BLENDER_POLL_INTERVAL_SECONDS, '3'), 3, 1);
+export const PAI_BLENDER_POLL_TIMEOUT_SECONDS = integer(pick(process.env.PAI_BLENDER_POLL_TIMEOUT_SECONDS, '900'), 900, 1);
 export const PAI_ASSET_ENDPOINT = pick(process.env.PAI_ASSET_ENDPOINT);
 export const PAI_ASSET_BUCKET = pick(process.env.PAI_ASSET_BUCKET);
 export const PAI_ASSET_REGION = pick(process.env.PAI_ASSET_REGION, 'us-east-1');

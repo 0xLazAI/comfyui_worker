@@ -1,0 +1,32 @@
+{
+  "id": "blender-pace-review",
+  "summary": "Audit a base GLB against its PACE file, fix missing or incorrect elements (placement, cameras, focal length, trajectory animations), and emit a corrected GLB plus a Markdown review report.",
+  "task_type": "blender",
+  "consumer_key": "blender_consumer",
+  "agent": "codex",
+  "requiresSourceImage": false,
+  "input": {
+    "inputs.base_glb.assetUri": {
+      "type": "string",
+      "required": true,
+      "description": "assets:// URI of the base GLB to audit and fix. Parsed worker-side into a node/camera/animation inventory and embedded (base64) into the fix script for runtime re-import."
+    },
+    "pace_document": {
+      "type": "object",
+      "required": true,
+      "description": "PACE 0.2 document used as ground truth for the audit (same shape as blender-pace-3d): scenes[].physical_layout (subjects/props by ref+world_xy+z+facing_deg, camera_setups by shot_id+world_xy+z+looking_at+lens_mm, focus_points) and shots[].camera.trajectory."
+    },
+    "scene_id": { "type": "string", "required": false },
+    "shot_id": { "type": "string", "required": false },
+    "agent": { "type": "string", "required": false, "default": "codex" },
+    "runner_target": { "type": "string", "required": false, "default": "gpu", "enum": ["gpu"] }
+  },
+  "output": {
+    "model_glb": "The corrected GLB (artifact id <scene_id>_fixed).",
+    "review_report": "Markdown report: issues found, fixed, unfixable, before/after (pace_review_report.md).",
+    "generated_script": "The Blender Python fix script (pace_review_fix_script)."
+  },
+  "artifactKinds": ["model_glb", "review_report", "generated_script"],
+  "pipeline": "download base GLB → inspect → agent audit (report + fix script) → import base GLB + run fix in Blender → re-export corrected GLB.",
+  "agentInstructions": "workflows/blender-pace-review/agent.md"
+}

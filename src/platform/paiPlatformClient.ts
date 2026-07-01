@@ -24,6 +24,14 @@ interface PaceFilesReadResponse {
   files: PaceFileResponse[];
 }
 
+export interface PaceFileIndexEntry {
+  path: string;
+  kind: string;
+  format: string;
+  sizeBytes?: number | null;
+  updatedAt?: string | null;
+}
+
 interface PaceFilesBatchResponse {
   project: string;
   changed: Array<{
@@ -240,6 +248,30 @@ class PaiPlatformClient {
       project: projectId,
       files,
     };
+  }
+
+  /**
+   * Lists PACE file entries under a path prefix (mirrors the frontend previz
+   * `PaceFileIndex` query). Used to enumerate a scene's shot manifests.
+   */
+  async listPaceFiles(projectId: string, prefix: string): Promise<PaceFileIndexEntry[]> {
+    const data = await this.requestGraphql<{
+      paceFileIndex: PaceFileIndexEntry[] | null;
+    }>(`
+      query ListPaceFiles($projectId: String!, $prefix: String!) {
+        paceFileIndex(projectId: $projectId, prefix: $prefix) {
+          path
+          kind
+          format
+          sizeBytes
+          updatedAt
+        }
+      }
+    `, {
+      projectId,
+      prefix,
+    });
+    return data.paceFileIndex || [];
   }
 
   async readPaceFile(projectId: string, path: string): Promise<PaceFileResponse> {

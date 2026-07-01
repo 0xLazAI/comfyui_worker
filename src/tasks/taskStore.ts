@@ -54,6 +54,60 @@ export class TaskStore {
     return mapRowToTaskRecord(result.rows[0]);
   }
 
+  async list(filters?: {
+    limit?: number;
+    taskType?: string;
+  }): Promise<WorkerTaskRecord[]> {
+    const pool = await getDatabasePool();
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+
+    const taskType = normalizeOptionalString(filters?.taskType);
+    if (taskType) {
+      values.push(taskType);
+      conditions.push(`task_type = $${values.length}`);
+    }
+
+    const limit = normalizeLimit(filters?.limit);
+    values.push(limit);
+    const limitParam = `$${values.length}`;
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const result = await pool.query(
+      `SELECT
+        task_id,
+        task_type,
+        project_id,
+        request_payload,
+        status,
+        queue_publish_status,
+        queue_published_at,
+        queue_publish_error,
+        progress,
+        eta,
+        message,
+        error_code,
+        result_payload,
+        request_id,
+        dedupe_key,
+        next_run_at,
+        started_at,
+        finished_at,
+        worker_name,
+        created_at,
+        updated_at,
+        current_attempt,
+        max_attempts,
+        backoff_seconds,
+        timeout_seconds
+      FROM worker_tasks
+      ${whereClause}
+      ORDER BY created_at DESC, task_id DESC
+      LIMIT ${limitParam}`,
+      values,
+    );
+    return result.rows.map(mapRowToTaskRecord);
+  }
+
   async create(record: WorkerTaskRecord): Promise<boolean> {
     const pool = await getDatabasePool();
     const client = await pool.connect();
@@ -407,6 +461,14 @@ function normalizeDateString(value: unknown): string | null {
 function normalizeOptionalString(value: unknown): string | null {
   const normalized = String(value || '').trim();
   return normalized || null;
+}
+
+function normalizeLimit(value: unknown): number {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized)) {
+    return 50;
+  }
+  return Math.min(Math.max(Math.floor(normalized), 1), 500);
 }
 
 function isUniqueViolationError(error: unknown): boolean {
