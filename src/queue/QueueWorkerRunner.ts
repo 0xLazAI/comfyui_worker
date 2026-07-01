@@ -6,7 +6,10 @@ interface QueueWorkerRunnerOptions {
   driver?: QueueDriver;
   closeables?: Array<{ close?: () => Promise<void> } | undefined>;
   exitHandler?: (exitCode: number) => void | Promise<void>;
+  recoveryDelayMs?: number;
 }
+
+const DEFAULT_RECOVERY_DELAY_MS = 5000;
 
 export class QueueWorkerRunner {
   constructor(
@@ -27,7 +30,7 @@ export class QueueWorkerRunner {
     let hardExit = false;
 
     try {
-      exitCode = await this.worker.runUntilStopped();
+      exitCode = await this.runWorkerWithRecovery();
     } catch (error: any) {
       if (!(error instanceof QueueWorkerExitError)) {
         throw error;
@@ -57,4 +60,28 @@ export class QueueWorkerRunner {
 
     return exitCode;
   }
+
+  private async runWorkerWithRecovery(): Promise<number> {
+    const recoveryDelayMs = this.options.recoveryDelayMs ?? DEFAULT_RECOVERY_DELAY_MS;
+
+    while (true) {
+      try {
+        return await this.worker.runUntilStopped();
+      } catch (error: any) {
+        if (error instanceof QueueWorkerExitError) {
+          throw error;
+        }
+        logger.error(
+          'queue worker loop failed; restarting in %dms %s',
+          recoveryDelayMs,
+          error?.stack || error?.message || error,
+        );
+        await sleep(recoveryDelayMs);
+      }
+    }
+  }
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }

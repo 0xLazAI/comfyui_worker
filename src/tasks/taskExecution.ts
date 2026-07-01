@@ -1,10 +1,12 @@
 import { PLATFORM_API_ENABLED, PROVIDER_POLL_INTERVAL_SECONDS } from '../infra/constants.js';
+import { BLENDER_CONSUMER_KEY, handleBlenderExecute } from './blenderTaskExecution.js';
 import { TaskRejectedError } from '../render/errors.js';
 import { hydrateRenderPanelPayload } from '../render/payload.js';
 import { finalizeStephenImageWorkflow } from '../render/stephenWorkflowExecution.js';
 import { getStephenRenderStatus } from '../render/stephenRenderClient.js';
 import { writeStoryboardOutputSidecar } from '../render/storyboardOutputs.js';
 import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
+import { isBlenderTaskType } from '../blender/workflowCatalog.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
 import { readTaskDefinitionBinding } from '../taskDefinitions/definitionSchema.js';
 import { handleReplacePropPanelExecute, REPLACE_PROP_PANEL_CONSUMER_KEY } from './replacePropTaskExecution.js';
@@ -575,10 +577,14 @@ function defaultConsumerKeyForTaskType(taskType: string): string {
   if (normalized === REPLACE_PROP_PANEL_TASK_TYPE) {
     return REPLACE_PROP_PANEL_CONSUMER_KEY;
   }
+  if (isBlenderTaskType(normalized)) {
+    return BLENDER_CONSUMER_KEY;
+  }
   return '';
 }
 
 const CONSUMER_HANDLERS: Record<string, ConsumerHandler> = {
+  [BLENDER_CONSUMER_KEY]: handleBlenderExecute,
   [RENDER_PANEL_CONSUMER_KEY]: handleRenderPanelExecute,
   [REPLACE_PROP_PANEL_CONSUMER_KEY]: handleReplacePropPanelExecute,
 };

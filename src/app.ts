@@ -10,8 +10,9 @@ import { CONTRACT_VERSION, PLATFORM_API_ENABLED, WORKER_NODE_TYPE, WORKER_TOKEN,
 import { WorkerRegistryPublisher } from './registry/WorkerRegistryPublisher.js';
 import { normalizeTaskDefinitionJson } from './taskDefinitions/definitionSchema.js';
 import { taskTypeDefinitionStore } from './taskDefinitions/taskTypeDefinitionStore.js';
+import { downloadAsset } from './render/assetStore.js';
 import { supportsConsumerKey } from './tasks/taskExecution.js';
-import { getTaskResponse, submitTask } from './tasks/taskService.js';
+import { getTaskResponse, listTaskEvents, listTaskObservations, submitTask } from './tasks/taskService.js';
 
 function parseObjectBody(value: unknown, field: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -72,6 +73,17 @@ function optionalBoolean(value: unknown): boolean | undefined {
   throw new ValidationError('enabled must be a boolean');
 }
 
+function optionalInteger(value: unknown, fallback: number, minimum = 1, maximum = 500): number {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || normalized < minimum) {
+    throw new ValidationError(`value must be an integer >= ${minimum}`);
+  }
+  return Math.min(Math.floor(normalized), maximum);
+}
+
 function requestActor(req: express.Request): string {
   return optionalString(req.header('x-operator') || req.header('x-actor') || req.header('x-user')) || 'system';
 }
@@ -123,23 +135,44 @@ export function createApp(): express.Express {
     });
   });
 
+  app.get('/tasks', async (req, res) => {
+    requireBearer(req.header('authorization') || undefined);
+    const tasks = await listTaskObservations({
+      limit: optionalInteger(req.query.limit, 50),
+      taskType: optionalString(req.query.task_type),
+    });
+    res.json({ tasks });
+  });
+
   app.post('/tasks', upload.fields([
     { name: 'source_image', maxCount: 1 },
     { name: 'image', maxCount: 1 },
+    { name: 'base_glb', maxCount: 1 },
   ]), async (req, res) => {
     const body = parseObjectBody(req.body, 'body');
     const payload = parsePayloadBody(body.payload);
     const sourceImageUpload = extractSourceImageUpload(req);
+    const baseGlbUpload = extractBaseGlbUpload(req);
     const response = await submitTask({
       taskId: requireString(body.task_id, 'task_id'),
       taskType: requireString(body.task_type, 'task_type'),
       projectId: requireString(body.project_id, 'project_id'),
       payload,
       sourceImageUpload,
+      baseGlbUpload,
       requestId: currentRequestId() ?? null,
       dedupeKey: optionalString(req.header('x-idempotency-key') || req.header('idempotency-key')),
     });
     res.json(response);
+  });
+
+  app.get('/tasks/:taskId/events', async (req, res) => {
+    requireBearer(req.header('authorization') || undefined);
+    const events = await listTaskEvents(String(req.params.taskId || '').trim());
+    if (!events) {
+      throw new NotFoundError('Task not found');
+    }
+    res.json({ events });
   });
 
   app.get('/tasks/:taskId', async (req, res) => {
@@ -148,6 +181,20 @@ export function createApp(): express.Express {
       throw new NotFoundError('Task not found');
     }
     res.json(task);
+  });
+
+  app.get('/assets', async (req, res) => {
+    requireBearer(req.header('authorization') || undefined);
+    const projectId = requireString(req.query.project_id, 'project_id');
+    const assetUri = requireString(req.query.asset_uri, 'asset_uri');
+    const asset = await downloadAsset(projectId, assetUri);
+    res.setHeader('cache-control', 'no-store');
+    res.setHeader('content-type', asset.contentType);
+    res.setHeader(
+      'content-disposition',
+      `inline; filename="${asset.filename.replace(/["\\]/g, '_')}"`,
+    );
+    res.send(asset.buffer);
   });
 
   app.get('/task-definitions', async (req, res) => {
@@ -254,6 +301,35 @@ function extractSourceImageUpload(req: express.Request): {
   const filename = String(file.originalname || '').trim();
   if (contentType && !contentType.startsWith('image/')) {
     throw new ValidationError('source_image must be an image file');
+  }
+
+  return {
+    buffer: file.buffer,
+    contentType: contentType || null,
+    filename: filename || null,
+  };
+}
+
+function extractBaseGlbUpload(req: express.Request): {
+  buffer: Buffer;
+  contentType?: string | null;
+  filename?: string | null;
+} | null {
+  const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+  const file = files?.base_glb?.[0] || null;
+  if (!file) {
+    return null;
+  }
+
+  const contentType = String(file.mimetype || '').trim().toLowerCase();
+  const filename = String(file.originalname || '').trim();
+  const looksLikeGlb =
+    filename.toLowerCase().endsWith('.glb') ||
+    contentType.includes('gltf') ||
+    contentType === 'application/octet-stream' ||
+    contentType === '';
+  if (!looksLikeGlb) {
+    throw new ValidationError('base_glb must be a .glb file');
   }
 
   return {

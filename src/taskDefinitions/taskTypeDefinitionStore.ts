@@ -17,8 +17,8 @@ const SYSTEM_ACTOR = 'system';
 export class TaskTypeDefinitionStore {
   async ensureReady(): Promise<void> {
     await initializeDatabase();
-    await this.ensureWorkerNames();
     await this.ensureBuiltInDefinitions();
+    await this.ensureWorkerNames();
   }
 
   async list(filters?: {
@@ -272,6 +272,13 @@ export class TaskTypeDefinitionStore {
       definitionJson: defaultReplacePropPanelDefinitionJson(),
       requiredFieldPaths: ['params.maskMode'],
     });
+    for (const seed of BLENDER_BUILT_IN_SEEDS) {
+      await this.ensureBuiltInDefinition({
+        taskType: seed.taskType,
+        description: seed.description,
+        definitionJson: seed.definitionJson(),
+      });
+    }
   }
 
   private async ensureBuiltInDefinition(input: {
@@ -280,53 +287,28 @@ export class TaskTypeDefinitionStore {
     definitionJson: TaskDefinitionJson;
     requiredFieldPaths?: string[];
   }): Promise<void> {
-    const existing = await this.getEnabledByWorkerAndTaskType(WORKER_NAME, input.taskType);
-    if (existing) {
-      const missingFields = (input.requiredFieldPaths || [])
-        .filter((fieldPath) => !existing.definitionJson.payload.fields[fieldPath]);
-      if (missingFields.length) {
-        const definitions = await this.list({
-          workerName: WORKER_NAME,
-          taskType: input.taskType,
-        });
-        const nextVersion = Math.max(existing.version, ...definitions.map((definition) => definition.version)) + 1;
-        await this.create({
-          workerName: WORKER_NAME,
-          taskType: input.taskType,
-          version: nextVersion,
-          enabled: true,
-          description: input.description,
-          definitionJson: input.definitionJson,
-          actor: SYSTEM_ACTOR,
-        });
-      }
-      return;
-    }
-
     const pool = await getDatabasePool();
-    const count = await pool.query(
-      `SELECT COUNT(*) AS count
-      FROM task_type_definitions
-      WHERE worker_name = $1 AND task_type = $2`,
-      [WORKER_NAME, input.taskType],
+    // Single atomic upsert: no TOCTOU race when multiple workers start concurrently
+    // against the same shared DB. The conflict arbiter must match the live unique
+    // index `uq_task_type_definitions_worker_type_version (worker_name, task_type,
+    // version)`; worker_name is omitted so it takes its column default and is then
+    // normalized per task_type by ensureWorkerNames().
+    await pool.query(
+      `INSERT INTO task_type_definitions
+        (task_type, version, enabled, description, definition_json, created_by, updated_by)
+       VALUES ($1, 1, true, $2, $3::jsonb, $4, $4)
+       ON CONFLICT (worker_name, task_type, version)
+       DO UPDATE SET
+         description = EXCLUDED.description,
+         definition_json = EXCLUDED.definition_json,
+         updated_by = EXCLUDED.updated_by`,
+      [
+        input.taskType,
+        input.description,
+        JSON.stringify(input.definitionJson),
+        SYSTEM_ACTOR,
+      ],
     );
-    if (Number(count.rows[0]?.count || 0) > 0) {
-      return;
-    }
-
-    await this.create({
-      workerName: WORKER_NAME,
-      taskType: input.taskType,
-      version: 1,
-      enabled: true,
-      description: input.description,
-      definitionJson: input.definitionJson,
-      actor: SYSTEM_ACTOR,
-    }).catch((error: any) => {
-      if (error?.code !== '23505') {
-        throw error;
-      }
-    });
   }
 
   private async ensureWorkerNames(): Promise<void> {
@@ -335,7 +317,7 @@ export class TaskTypeDefinitionStore {
       `UPDATE task_type_definitions
       SET worker_name = CASE
         WHEN task_type = 'render_panel' THEN $1
-        WHEN task_type = 'blender' THEN 'blender_worker'
+        WHEN task_type LIKE 'blender\\_%' THEN 'blender_worker'
         ELSE 'default-worker'
       END
       WHERE worker_name IS NULL OR BTRIM(worker_name) = ''`,
@@ -561,3 +543,57 @@ function defaultReplacePropPanelDefinitionJson(): TaskDefinitionJson {
     },
   });
 }
+
+// Each Blender workflow is its own task_type (snake_case, mirroring render_panel /
+// replace_prop_panel) with a precise per-workflow input contract, so the platform sees
+// exactly which fields each workflow requires. task_type is authoritative for the
+// workflow — there is no `workflow` payload field. The fine-grained validation still
+// runs in hydrateBlenderTaskPayload (src/blender/payload.ts); these definitions are the
+// published contract.
+type BlenderFieldRule = {
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'json';
+  required: boolean;
+  default?: string | number | boolean;
+  description?: string;
+};
+
+// Codex agent + GPU runner selection are shared by every Blender workflow.
+const BLENDER_COMMON_FIELDS: Record<string, BlenderFieldRule> = {
+  agent: { type: 'string', required: false, default: 'codex', description: '生成 agent，目前仅支持 codex。' },
+  runner_target: { type: 'string', required: false, default: 'gpu', description: '执行目标：gpu（走队列，唯一选项）。' },
+};
+
+function blenderDefinitionJson(fields: Record<string, BlenderFieldRule>): TaskDefinitionJson {
+  return normalizeTaskDefinitionJson({
+    consumer_key: 'blender_consumer',
+    execution: {
+      // Blender generation runs a vision-capable agent plus a render + review loop,
+      // which routinely takes several minutes; keep the job from timing out at the 300s default.
+      timeout_seconds: 1800,
+    },
+    payload: {
+      allow_unknown_fields: false,
+      fields: { ...fields, ...BLENDER_COMMON_FIELDS },
+    },
+  });
+}
+
+// blender_pace_review is the only blender workflow this worker runs. The other blender
+// workflows (create-3d / update-3d / pace-3d) are not part of this worker.
+const BLENDER_BUILT_IN_SEEDS: Array<{
+  taskType: string;
+  description: string;
+  definitionJson: () => TaskDefinitionJson;
+}> = [
+  {
+    taskType: 'blender_pace_review',
+    description: '批量按 shot 审核并修正 GLB：每个 shot 从平台取 PACE + shot_glb 产物，修正后回写 glb_checked。',
+    definitionJson: () =>
+      blenderDefinitionJson({
+        // Full shot ids, e.g. ["hs001_sh001","hs001_sh002"]. sceneId is derived from each
+        // shot id; the shot's PACE and its shot_glb artifact are fetched from the platform.
+        shots: { type: 'json', required: true, description: '待审核的完整 shot id 数组，如 ["hs001_sh001"]。' },
+        prompt: { type: 'string', required: false, description: '可选补充提示词。' },
+      }),
+  },
+];

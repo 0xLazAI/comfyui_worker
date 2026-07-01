@@ -79,7 +79,7 @@ export async function uploadRenderAsset(
     filenameHint?: string;
   },
 ): Promise<UploadedAsset> {
-  return uploadAsset(projectId, 'renders', input);
+  return uploadWorkerAsset(projectId, 'renders', input);
 }
 
 export async function uploadSourceImageAsset(
@@ -90,27 +90,28 @@ export async function uploadSourceImageAsset(
     filenameHint?: string;
   },
 ): Promise<UploadedAsset> {
-  return uploadAsset(projectId, 'uploads', input);
+  return uploadWorkerAsset(projectId, 'uploads', input);
 }
 
-async function uploadAsset(
+export async function uploadWorkerAsset(
   projectId: string,
-  assetGroup: string,
+  group: string,
   input: {
     buffer: Buffer;
     contentType?: string;
     filenameHint?: string;
   },
 ): Promise<UploadedAsset> {
+  const normalizedGroup = normalizeAssetGroup(group);
   const extension = detectExtension(input.filenameHint, input.contentType);
   const filename = `${utcDateStamp()}-${randomBytes(4).toString('base64url')}.${extension}`;
-  const assetUri = `assets://${assetGroup}/${filename}`;
+  const assetUri = `assets://${normalizedGroup}/${filename}`;
   const contentType = input.contentType || guessContentTypeFromFilename(filename);
 
   if (PLATFORM_API_ENABLED) {
     const upload = await paiPlatformClient.createAssetUploadUrl({
       projectId,
-      assetKind: assetKindForGroup(assetGroup),
+      assetKind: assetKindForGroup(normalizedGroup),
       contentType,
     });
     await uploadViaSignedUrl(upload.uploadUrl, {
@@ -166,6 +167,12 @@ function normalizeUploadHeaders(headers: Record<string, string>): Record<string,
 }
 
 function assetKindForGroup(assetGroup: string): string {
+  // Map to the platform AssetKind enum (STORYBOARD | RENDER | ENTITY_IMAGE |
+  // ENTITY_MODEL_3D | ANNOTATION). assetKind only picks the S3 prefix; the artifact
+  // `kind` (shot_glb / glb_checked / ...) is recorded separately in the PACE manifest.
+  if (assetGroup === 'blender') {
+    return 'ENTITY_MODEL_3D';
+  }
   if (assetGroup === 'renders') {
     return 'RENDER';
   }
@@ -214,6 +221,14 @@ function filenameFromUri(assetUri: string): string {
   return assetUri.slice('assets://'.length).split('/').pop() || 'asset.bin';
 }
 
+function normalizeAssetGroup(group: string): string {
+  const normalized = String(group || '').trim();
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(normalized)) {
+    throw new Error('asset group must be a non-empty slug');
+  }
+  return normalized;
+}
+
 function normalizePrefix(prefix: string): string {
   const normalized = String(prefix || '').trim().replace(/^\/+/, '');
   if (!normalized) {
@@ -232,12 +247,28 @@ function renderPrefixTemplate(template: string, projectId: string): string {
 
 function detectExtension(filenameHint?: string, contentType?: string): string {
   const hinted = String(filenameHint || '').trim().toLowerCase();
-  const matched = /\.(png|jpg|jpeg|webp)$/i.exec(hinted);
+  const matched = /\.([a-z0-9]+)$/i.exec(hinted);
   if (matched?.[1]) {
-    return matched[1] === 'jpeg' ? 'jpg' : matched[1];
+    const extension = matched[1] === 'jpeg' ? 'jpg' : matched[1];
+    if (isSupportedExtension(extension)) {
+      return extension;
+    }
   }
 
   const normalizedType = String(contentType || '').toLowerCase();
+  if (normalizedType.includes('x-blender')) {
+    return 'blend';
+  }
+  if (normalizedType.includes('model/obj')) {
+    return 'obj';
+  }
+  // gltf checks must precede the json check below — `model/gltf+json` contains "json".
+  if (normalizedType.includes('gltf-binary')) {
+    return 'glb';
+  }
+  if (normalizedType.includes('gltf')) {
+    return 'gltf';
+  }
   if (normalizedType.includes('png')) {
     return 'png';
   }
@@ -247,18 +278,46 @@ function detectExtension(filenameHint?: string, contentType?: string): string {
   if (normalizedType.includes('webp')) {
     return 'webp';
   }
+  if (normalizedType.includes('json')) {
+    return 'json';
+  }
+  if (normalizedType.includes('x-python')) {
+    return 'py';
+  }
   return 'png';
 }
 
 function guessContentTypeFromFilename(filename: string): string {
   const normalized = filename.toLowerCase();
+  if (normalized.endsWith('.blend')) {
+    return 'application/x-blender';
+  }
+  if (normalized.endsWith('.obj')) {
+    return 'model/obj';
+  }
+  if (normalized.endsWith('.glb')) {
+    return 'model/gltf-binary';
+  }
+  if (normalized.endsWith('.gltf')) {
+    return 'model/gltf+json';
+  }
   if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
     return 'image/jpeg';
   }
   if (normalized.endsWith('.webp')) {
     return 'image/webp';
   }
+  if (normalized.endsWith('.json')) {
+    return 'application/json';
+  }
+  if (normalized.endsWith('.py')) {
+    return 'text/x-python';
+  }
   return 'image/png';
+}
+
+function isSupportedExtension(extension: string): boolean {
+  return ['blend', 'obj', 'glb', 'gltf', 'png', 'jpg', 'webp', 'json', 'py'].includes(extension);
 }
 
 function utcDateStamp(): string {

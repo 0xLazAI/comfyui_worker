@@ -8,7 +8,7 @@ import {
 } from '../infra/constants.js';
 import { ValidationError } from '../infra/HttpError.js';
 import { currentRequestId } from '../infra/logger.js';
-import { uploadSourceImageAsset } from '../render/assetStore.js';
+import { uploadSourceImageAsset, uploadWorkerAsset } from '../render/assetStore.js';
 import { buildRenderPanelStephenSubmitBody, buildReplacePropStephenSubmitBody } from '../render/stephenWorkflowBodies.js';
 import { submitStephenImageWorkflow } from '../render/stephenWorkflowExecution.js';
 import { normalizeProjectRoot, hydrateRenderPanelPayload } from '../render/payload.js';
@@ -24,8 +24,20 @@ import { TASK_RUNTIME_META_KEY } from '../taskDefinitions/types.js';
 import { enqueueTaskRecord } from './taskScheduler.js';
 import { taskStore } from './taskStore.js';
 import { supportsConsumerKey } from './taskExecution.js';
-import type { PublicTaskResponse, SubmitTaskInput, WorkerTaskRecord } from './types.js';
-import { mapWorkerTaskStatusToPublicStatus, toPublicTaskResponse, utcNow } from './types.js';
+import type {
+  PublicTaskResponse,
+  SubmitTaskInput,
+  TaskEventResponse,
+  TaskObservationResponse,
+  WorkerTaskRecord,
+} from './types.js';
+import {
+  mapWorkerTaskStatusToPublicStatus,
+  toPublicTaskResponse,
+  toTaskEventResponse,
+  toTaskObservationResponse,
+  utcNow,
+} from './types.js';
 import { ProviderRequestError, TaskRejectedError } from '../render/errors.js';
 import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
 
@@ -59,9 +71,10 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
     ? ''
     : normalizeProjectRoot(`${PROJECTS_ROOT.replace(/\/+$/, '')}/${input.projectId}`);
   const payloadWithSourceImage = await attachUploadedSourceImage(input.projectId, input.payload, input.sourceImageUpload);
+  const payloadWithUploads = await attachUploadedBaseGlb(input.projectId, payloadWithSourceImage, input.baseGlbUpload);
   const payload = attachRuntimeMetadata(
     attachTaskDefinitionBinding(
-      normalizePayloadWithDefinition(structuredClone(payloadWithSourceImage), definition.definitionJson),
+      normalizePayloadWithDefinition(structuredClone(payloadWithUploads), definition.definitionJson),
       {
         definitionId: definition.id,
         version: definition.version,
@@ -90,9 +103,11 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
     createdAt: now,
     updatedAt: now,
     currentAttempt: 0,
-    maxAttempts: TASK_MAX_ATTEMPTS,
-    backoffSeconds: [...TASK_BACKOFF_SECONDS],
-    timeoutSeconds: TASK_TIMEOUT_SECONDS,
+    maxAttempts: definition.definitionJson.execution?.max_attempts ?? TASK_MAX_ATTEMPTS,
+    backoffSeconds: definition.definitionJson.execution?.backoff_seconds
+      ? [...definition.definitionJson.execution.backoff_seconds]
+      : [...TASK_BACKOFF_SECONDS],
+    timeoutSeconds: definition.definitionJson.execution?.timeout_seconds ?? TASK_TIMEOUT_SECONDS,
     requestId: input.requestId ?? currentRequestId() ?? null,
     dedupeKey: input.dedupeKey ?? null,
     nextRunAt: null,
@@ -219,6 +234,46 @@ async function attachUploadedSourceImage(
   image.assetUri = uploaded.assetUri;
 
   return normalized;
+}
+
+async function attachUploadedBaseGlb(
+  projectId: string,
+  payload: Record<string, unknown>,
+  baseGlbUpload: SubmitTaskInput['baseGlbUpload'],
+): Promise<Record<string, unknown>> {
+  if (!baseGlbUpload) {
+    return payload;
+  }
+
+  const normalized = structuredClone(payload || {});
+  const existingAssetUri = readExistingBaseGlbAssetUri(normalized);
+  if (existingAssetUri) {
+    throw new ValidationError('payload.inputs.base_glb.assetUri cannot be provided together with base_glb upload');
+  }
+
+  const uploaded = await uploadWorkerAsset(projectId, 'uploads', {
+    buffer: baseGlbUpload.buffer,
+    contentType: baseGlbUpload.contentType || undefined,
+    filenameHint: baseGlbUpload.filename || undefined,
+  });
+
+  const inputs = ensureObjectField(normalized, 'inputs');
+  const baseGlb = ensureObjectField(inputs, 'base_glb');
+  baseGlb.assetUri = uploaded.assetUri;
+
+  return normalized;
+}
+
+function readExistingBaseGlbAssetUri(payload: Record<string, unknown>): string {
+  const inputs = payload.inputs;
+  if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) {
+    return '';
+  }
+  const baseGlb = (inputs as Record<string, unknown>).base_glb;
+  if (!baseGlb || typeof baseGlb !== 'object' || Array.isArray(baseGlb)) {
+    return '';
+  }
+  return String((baseGlb as Record<string, unknown>).assetUri || '').trim();
 }
 
 function readExistingInputAssetUri(payload: Record<string, unknown>): string {
@@ -350,6 +405,26 @@ export async function getTaskResponse(taskId: string): Promise<PublicTaskRespons
 
 function requiresStephenSubmission(taskType: string): boolean {
   return taskType === RENDER_PANEL_TASK_TYPE || taskType === REPLACE_PROP_PANEL_TASK_TYPE;
+}
+
+export async function listTaskObservations(filters?: {
+  limit?: number;
+  taskType?: string;
+}): Promise<TaskObservationResponse[]> {
+  const tasks = await taskStore.list({
+    limit: filters?.limit,
+    taskType: filters?.taskType,
+  });
+  return tasks.map(toTaskObservationResponse);
+}
+
+export async function listTaskEvents(taskId: string): Promise<TaskEventResponse[] | null> {
+  const task = await taskStore.get(taskId);
+  if (!task) {
+    return null;
+  }
+  const events = await taskStore.listEvents(taskId);
+  return events.map(toTaskEventResponse);
 }
 
 async function submitProviderJob(
