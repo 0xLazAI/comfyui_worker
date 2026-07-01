@@ -17,6 +17,7 @@ import {
   computeRetryDelaySeconds,
   expectTask,
   extractProjectRoot,
+  isProviderStatusPending,
   loadStoryboardProjectContextOrReject,
   normalizeWorkerName,
   progressForProviderStatus,
@@ -140,7 +141,7 @@ export async function handleRenderPanelExecute(
       });
     }
 
-    if (normalizedStatus === 'submitted' || normalizedStatus === 'queued' || normalizedStatus === 'running') {
+    if (isProviderStatusPending(normalizedStatus)) {
       const delaySeconds = PROVIDER_POLL_INTERVAL_SECONDS;
       const inProgressRecord = {
         ...record,
@@ -244,6 +245,51 @@ export async function handleRenderPanelExecute(
         durationMs: Date.now() - new Date(startedAt).getTime(),
         resultPayload: detail,
         errorMessage: String(status.error || 'Stephen render failed'),
+      });
+      return;
+    }
+
+    if (normalizedStatus !== 'done') {
+      const finishedAt = utcNow();
+      const message = `Stephen render returned unexpected status: ${normalizedStatus}`;
+      const detail = buildTaskFailureDetail(new Error(message));
+      await taskStore.save({
+        ...record,
+        requestPayload: requestPayloadWithProvider,
+        status: 'failed',
+        progress: null,
+        eta: null,
+        message,
+        errorCode: 'provider_unexpected_status',
+        resultPayload: detail,
+        currentAttempt: context.attempts,
+        nextRunAt: null,
+        finishedAt,
+        workerName,
+        updatedAt: utcNow(),
+      });
+      await taskStore.appendEvent({
+        taskId,
+        eventType: 'failed',
+        attemptNo: context.attempts,
+        workerName,
+        message: 'render_panel execution failed',
+        detailJson: {
+          failure: detail,
+          providerJobId: status.job_id,
+          providerStatus: normalizedStatus,
+        },
+      });
+      await taskStore.saveAttempt({
+        taskId,
+        attemptNo: context.attempts,
+        status: 'failed',
+        workerName,
+        startedAt,
+        finishedAt,
+        durationMs: Date.now() - new Date(startedAt).getTime(),
+        resultPayload: detail,
+        errorMessage: message,
       });
       return;
     }
