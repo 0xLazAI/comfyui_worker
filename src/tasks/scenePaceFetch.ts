@@ -74,7 +74,7 @@ export async function writeShotGlbCheckedArtifact(input: {
   filename?: string;
   sourceGlbUri?: string | null;
 }): Promise<void> {
-  await paiPlatformClient.writePaceFiles(input.projectId, {
+  const result = await paiPlatformClient.writePaceFiles(input.projectId, {
     patches: [
       {
         path: `scenes/${input.sceneId}/shots/${input.shotId}/manifest.json`,
@@ -98,6 +98,19 @@ export async function writeShotGlbCheckedArtifact(input: {
       },
     ],
   });
+
+  // The server validates the patched manifest against the PACE schema. If it
+  // rejects the write, the manifest was NOT persisted correctly — surface it so
+  // the caller records the shot as not-written-back instead of a false success.
+  if (result?.validation && result.validation.ok === false) {
+    const issues = (result.validation.issues || [])
+      .map((issue) => String((issue as { message?: unknown }).message ?? JSON.stringify(issue)))
+      .join('; ');
+    throw new TaskRejectedError(
+      `PACE writeback validation failed for shot ${input.shotId}: ${issues || 'unknown validation error'}`,
+      'pace_writeback_invalid',
+    );
+  }
 }
 
 /** Returns the latest `assets://` uri among a shot manifest's artifacts of the given kind. */

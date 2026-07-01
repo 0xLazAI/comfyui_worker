@@ -109,4 +109,20 @@ describe('writeShotGlbCheckedArtifact', () => {
       mediaType: 'model/gltf-binary',
     });
   });
+
+  test('throws when the server rejects the patched manifest (validation.ok=false)', async () => {
+    writePaceFiles.mockResolvedValue({
+      changed: [],
+      validation: { ok: false, issues: [{ code: 'schema', message: 'artifacts[7].kind is invalid' }] },
+    });
+
+    await expect(
+      writeShotGlbCheckedArtifact({
+        projectId: 'proj_1',
+        sceneId: 's001',
+        shotId: 'hs001_sh001',
+        assetUri: 'assets://blender/op.glb',
+      }),
+    ).rejects.toMatchObject({ code: 'pace_writeback_invalid' });
+  });
 });

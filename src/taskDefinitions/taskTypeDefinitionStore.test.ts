@@ -89,6 +89,8 @@ describe('TaskTypeDefinitionStore.ensureReady', () => {
         byTaskType[String(values[0])] = {
           description: values[1],
           actor: values[3],
+          // Blender seeds pass an explicit worker_name as $5; render/replace omit it.
+          workerName: values[4] === undefined ? null : String(values[4]),
           definition: JSON.parse(String(values[2])),
         };
       }
@@ -109,6 +111,9 @@ describe('TaskTypeDefinitionStore.ensureReady', () => {
       expect(seeded.blender_pace_3d).toBeUndefined();
 
       expect(seeded.blender_pace_review.actor).toBe('system');
+      // Registered explicitly under blender_worker so it isn't left on the
+      // 'default-worker' column default (ensureWorkerNames only fixes empty values).
+      expect(seeded.blender_pace_review.workerName).toBe('blender_worker');
       expect(seeded.blender_pace_review.definition).toMatchObject({
         consumer_key: 'blender_consumer',
         execution: { timeout_seconds: 1800 },

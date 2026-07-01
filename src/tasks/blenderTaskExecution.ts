@@ -653,6 +653,15 @@ function normalizeWorkerName(): string {
   return normalized || `${os.hostname()}:${process.pid}`;
 }
 
+/**
+ * Resolves the directory used as the codex thread's working dir (`--cd`).
+ *
+ * pace-review pulls PACE + assets from the platform and reads its instructions
+ * from `<cwd>/workflows/blender-pace-review/agent.md`, so it needs a valid local
+ * directory but NOT the project's files. In platform mode the task carries no
+ * project root (nothing is mounted locally), so fall back to the worker's cwd —
+ * otherwise the codex thread would fail on a missing `--cd` before the agent runs.
+ */
 function extractProjectRoot(requestPayload: Record<string, unknown>): string {
   const meta = requestPayload?._taskRuntime;
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
@@ -667,7 +676,7 @@ function extractProjectRoot(requestPayload: Record<string, unknown>): string {
     return legacyProjectRoot;
   }
 
-  throw new Error('request payload is missing _taskRuntime.projectRoot');
+  return process.cwd();
 }
 
 function buildTaskFailureDetail(error: unknown): Record<string, unknown> {

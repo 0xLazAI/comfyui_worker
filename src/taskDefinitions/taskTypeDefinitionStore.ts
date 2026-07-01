@@ -13,6 +13,9 @@ import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/
 const DEFAULT_TASK_DEFINITION_DESCRIPTION = '默认的 render_panel 任务定义。';
 const DEFAULT_REPLACE_PROP_TASK_DEFINITION_DESCRIPTION = '默认的 replace_prop_panel 任务定义。';
 const SYSTEM_ACTOR = 'system';
+// Blender task types register under this role name so the platform routes blender
+// tasks to whichever worker claims it — matches the ensureWorkerNames() mapping.
+const BLENDER_WORKER_NAME = 'blender_worker';
 
 export class TaskTypeDefinitionStore {
   async ensureReady(): Promise<void> {
@@ -277,6 +280,11 @@ export class TaskTypeDefinitionStore {
         taskType: seed.taskType,
         description: seed.description,
         definitionJson: seed.definitionJson(),
+        // Register blender task types explicitly under blender_worker: the
+        // worker_name column defaults to 'default-worker' (non-empty), so
+        // ensureWorkerNames() — which only rewrites empty values — would leave a
+        // blender definition mis-routed to default-worker.
+        workerName: BLENDER_WORKER_NAME,
       });
     }
   }
@@ -286,13 +294,38 @@ export class TaskTypeDefinitionStore {
     description: string;
     definitionJson: TaskDefinitionJson;
     requiredFieldPaths?: string[];
+    workerName?: string;
   }): Promise<void> {
     const pool = await getDatabasePool();
     // Single atomic upsert: no TOCTOU race when multiple workers start concurrently
     // against the same shared DB. The conflict arbiter must match the live unique
     // index `uq_task_type_definitions_worker_type_version (worker_name, task_type,
-    // version)`; worker_name is omitted so it takes its column default and is then
-    // normalized per task_type by ensureWorkerNames().
+    // version)`.
+    //
+    // When a workerName is given we seed it explicitly so routing is deterministic
+    // and the arbiter is stable across reboots. Otherwise worker_name is omitted so
+    // it takes its column default and is normalized per task_type by ensureWorkerNames().
+    if (input.workerName) {
+      await pool.query(
+        `INSERT INTO task_type_definitions
+          (worker_name, task_type, version, enabled, description, definition_json, created_by, updated_by)
+         VALUES ($5, $1, 1, true, $2, $3::jsonb, $4, $4)
+         ON CONFLICT (worker_name, task_type, version)
+         DO UPDATE SET
+           description = EXCLUDED.description,
+           definition_json = EXCLUDED.definition_json,
+           updated_by = EXCLUDED.updated_by`,
+        [
+          input.taskType,
+          input.description,
+          JSON.stringify(input.definitionJson),
+          SYSTEM_ACTOR,
+          input.workerName,
+        ],
+      );
+      return;
+    }
+
     await pool.query(
       `INSERT INTO task_type_definitions
         (task_type, version, enabled, description, definition_json, created_by, updated_by)
