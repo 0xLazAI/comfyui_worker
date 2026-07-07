@@ -30,6 +30,20 @@ function integerList(value: string, fallback: number[]): number[] {
   return source.length ? source : fallback;
 }
 
+function booleanFlag(value: string, fallback: boolean): boolean {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
 export const NODE_ENV = pick(process.env.NODE_ENV, 'development');
 export const PLATFORM_API_BASE = pick(process.env.PAI_PLATFORM_API_BASE);
 export const PLATFORM_API_KEY = pick(process.env.PAI_PLATFORM_API_KEY);
@@ -76,6 +90,19 @@ export const TASK_RETRY_AFTER_SECONDS = integer(pick(process.env.COMFYUI_WORKER_
 export const PROVIDER_POLL_INTERVAL_SECONDS = integer(
   pick(process.env.COMFYUI_WORKER_PROVIDER_POLL_INTERVAL_SECONDS, '3'),
   3,
+  1,
+);
+export const LORA_TRAINER_SSH_HOST = pick(process.env.LORA_TRAINER_SSH_HOST);
+export const LORA_TRAINER_SSH_PORT = integer(pick(process.env.LORA_TRAINER_SSH_PORT, '22'), 22, 1);
+export const LORA_TRAINER_COMMAND = pick(process.env.LORA_TRAINER_COMMAND, '/home/ubuntu/sd/lora-trainer/bin/train_style_lora');
+export const LORA_TRAINER_SYNC_ENABLED = booleanFlag(pick(process.env.LORA_TRAINER_SYNC_ENABLED, 'true'), true);
+export const LORA_TRAINER_LOCAL_SCRIPT = pick(process.env.LORA_TRAINER_LOCAL_SCRIPT, 'scripts/train_style_lora_runner.py');
+export const LORA_TRAINER_REMOTE_SCRIPT = pick(process.env.LORA_TRAINER_REMOTE_SCRIPT);
+export const LORA_TRAINER_REMOTE_ENV_FILE = pick(process.env.LORA_TRAINER_REMOTE_ENV_FILE, '/home/ubuntu/sd/lora-trainer/.env');
+export const LORA_TRAINER_SYNC_LOCK_FILE = pick(process.env.LORA_TRAINER_SYNC_LOCK_FILE, '/home/ubuntu/sd/lora-trainer/.sync.lock');
+export const LORA_TRAINER_POLL_INTERVAL_SECONDS = integer(
+  pick(process.env.LORA_TRAINER_POLL_INTERVAL_SECONDS, '30'),
+  30,
   1,
 );
 export const STEPHEN_RENDER_BASE_URL = pick(process.env.STEPHEN_RENDER_BASE_URL);

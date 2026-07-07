@@ -46,9 +46,11 @@
 
 ## Task Contract
 
-当前只支持：
+当前主要支持：
 
 - `task_type = render_panel`
+- `task_type = replace_prop_panel`
+- `task_type = train_style_lora`
 
 `payload` 采用通用结构：
 
@@ -90,6 +92,273 @@ worker 收到文件后会先上传到对象存储，再自动写回 `payload.inp
   - `scene_02_shot_01_panel_0001`
 - 输入图片可以直接传 `assets://`，也可以通过 `multipart/form-data` 上传源文件
 - `backend`、`base_model`、`positive`、`negative` 不属于公共 contract，不允许直接出现在 payload 顶层
+
+### `train_style_lora` 风格 LoRA 训练
+
+`train_style_lora` 用来提交一个风格化 LoRA 训练任务。worker 只管理生命周期：
+
+- 接收任务、校验入参、写数据库状态
+- 通过 SSH 调 GPU 机器上的训练 runner
+- 定期轮询 runner 状态
+- 训练完成后登记本地 LoRA 路径
+
+worker 不下载训练集、不拼训练脚本、不上传 LoRA 到 S3。GPU runner 负责从 S3 拉数据集、校验 image/txt pair、执行训练，并在 `finalize` 时返回本地结果路径。
+
+最小初训请求：
+
+```jsonc
+{
+  "task_id": "train-dunhuang-style-v3",
+  "task_type": "train_style_lora",
+  "project_id": "film",
+  "payload": {
+    "mode": "initial",
+    "baseProfile": "flux2_dev_bf16",
+    "lora": {
+      "name": "dunhuang_flux2_style_v3",
+      "kind": "style",
+      "trigger": "dunhuangmap"
+    },
+    "dataset": {
+      "uri": "s3://pai-training-datasets/film/dunhuang_style_v3/"
+    }
+  }
+}
+```
+
+补训请求：
+
+```jsonc
+{
+  "task_id": "continue-dunhuang-style-v4",
+  "task_type": "train_style_lora",
+  "project_id": "film",
+  "payload": {
+    "mode": "continue_weights",
+    "baseProfile": "flux2_dev_bf16",
+    "lora": {
+      "name": "dunhuang_flux2_style_v4",
+      "kind": "style",
+      "trigger": "dunhuangmap"
+    },
+    "dataset": {
+      "uri": "s3://pai-training-datasets/film/dunhuang_style_v4_continue/"
+    },
+    "continueFrom": {
+      "loraPath": "/home/ubuntu/sd/lora_runs/train_xxx/output/dunhuang_flux2_style_v3.safetensors"
+    },
+    "train": {
+      "steps": 1200,
+      "lr": 0.00005
+    }
+  }
+}
+```
+
+支持的训练基座：
+
+- `flux2_dev_bf16`：用 FLUX2 bf16 训练，产物用于 `flux2_dev_fp8mixed.safetensors` 推理。
+- `flux2_klein9b`：用 Klein9B 训练，产物用于 Klein9B 推理工作流。
+
+数据集格式固定为单层平铺 S3 prefix：
+
+```text
+s3://pai-training-datasets/film/dunhuang_style_v3/
+  000001.png
+  000001.txt
+  000002.jpg
+  000002.txt
+  000003.webp
+  000003.txt
+```
+
+规则：
+
+- 第一版不支持子目录。
+- 每张图片必须有同名 `.txt` caption。
+- 支持图片后缀：`.png`、`.jpg`、`.jpeg`、`.webp`。
+- caption 固定为 UTF-8 `.txt`，不能为空。
+- 缺 caption、空 caption、坏图时，runner 应让任务失败并返回错误明细。
+
+可选训练参数：
+
+```jsonc
+{
+  "train": {
+    "preset": "style",
+    "rank": 16,
+    "alpha": 16,
+    "steps": 2000,
+    "lr": 0.0001,
+    "seed": 42,
+    "saveEvery": 500
+  },
+  "publish": {
+    "mode": "local",
+    "filename": "dunhuang_flux2_style_v3.safetensors"
+  }
+}
+```
+
+如果不传训练参数，worker 会按 `baseProfile + mode` 补默认值：
+
+- `flux2_dev_bf16` 初训：`rank=16`、`alpha=16`、`steps=2000`、`lr=1e-4`
+- `flux2_dev_bf16` 补训：`rank=16`、`alpha=16`、`steps=1200`、`lr=5e-5`
+- `flux2_klein9b` 初训：`rank=32`、`alpha=16`、`steps=4000`、`lr=1e-4`
+- `flux2_klein9b` 补训：`rank=32`、`alpha=16`、`steps=1500`、`lr=5e-5`
+
+GPU runner 命令约定：
+
+```bash
+train_style_lora submit < request.json
+train_style_lora status --job-id train_xxx
+train_style_lora finalize --job-id train_xxx
+```
+
+训练 runner 脚本由本仓库维护：
+
+- 本地源文件：`scripts/train_style_lora_runner.py`
+- worker 在 `submit` 前计算本地脚本 `sha256`
+- 通过 SSH 读取远端 `${LORA_TRAINER_REMOTE_SCRIPT}.sha256`
+- hash 一致时跳过同步
+- hash 不一致时先 `scp` 到 `.tmp`
+- GPU 机上用 `flock` 锁住 `${LORA_TRAINER_SYNC_LOCK_FILE}`，拿锁后复查 hash
+- 复查仍不一致时再 `mv` 原子替换；如果等锁期间其他 worker 已同步完成，就清理 `.tmp` 并跳过
+- 只同步 `.py` runner，不覆盖 GPU 机上的 `.env`
+- `status/finalize` 不做同步，仍然执行固定 `LORA_TRAINER_COMMAND`
+
+相关环境变量：
+
+```bash
+LORA_TRAINER_SYNC_ENABLED=true
+LORA_TRAINER_LOCAL_SCRIPT=scripts/train_style_lora_runner.py
+LORA_TRAINER_REMOTE_SCRIPT=/home/ubuntu/sd/lora-trainer/bin/train_style_lora.py
+LORA_TRAINER_REMOTE_ENV_FILE=/home/ubuntu/sd/lora-trainer/.env
+LORA_TRAINER_SYNC_LOCK_FILE=/home/ubuntu/sd/lora-trainer/.sync.lock
+```
+
+`LORA_TRAINER_COMMAND` 建议保持为固定 wrapper，例如：
+
+```bash
+/home/ubuntu/sd/lora-trainer/bin/train_style_lora
+```
+
+同步逻辑会确保 wrapper 存在；wrapper 负责加载 `LORA_TRAINER_REMOTE_ENV_FILE`，然后执行远端 `.py` runner。
+
+`submit` 返回：
+
+```json
+{
+  "jobId": "train_xxx",
+  "runDir": "/home/ubuntu/sd/lora_runs/train_xxx",
+  "statusPath": "/home/ubuntu/sd/lora_runs/train_xxx/status.json",
+  "logPath": "/home/ubuntu/sd/lora_runs/train_xxx/train.log",
+  "outputDir": "/home/ubuntu/sd/lora_runs/train_xxx/output"
+}
+```
+
+`status` 返回：
+
+```json
+{
+  "status": "running",
+  "phase": "training",
+  "currentStep": 820,
+  "totalSteps": 2000,
+  "progress": 0.41,
+  "message": "training 820/2000"
+}
+```
+
+`finalize` 返回：
+
+```json
+{
+  "status": "succeeded",
+  "lora": {
+    "publishMode": "local",
+    "usableScope": "training_gpu_only",
+    "name": "dunhuang_flux2_style_v3",
+    "baseProfile": "flux2_dev_bf16",
+    "trigger": "dunhuangmap",
+    "localPath": "/home/ubuntu/sd/lora_runs/train_xxx/output/dunhuang_flux2_style_v3.safetensors",
+    "metadataPath": "/home/ubuntu/sd/lora_runs/train_xxx/output/dunhuang_flux2_style_v3.metadata.json"
+  }
+}
+```
+
+失败策略：
+
+- 训练脚本中途报错时，整个 `train_style_lora` task 标记为 `failed`。
+- 第一版不做自动断点恢复。
+- 重新训练时重新提交新的 task，新建新的 run 目录，从头跑。
+- 测试图不放在训练流程里；如需验收，后续单独接 `test_lora_render` 任务。
+
+### `replace_prop_panel` 风格锁定示例
+
+下面这个例子用于“把舞狮头部替换成猪头造型的舞狮头”，重点是让新物体继承原图的黑白漫画线稿风格，而不是生成成默认的彩色写实猪头。
+
+```jsonc
+{
+  "task_id": "codex-pig-head-style-lock-20260626020600",
+  "task_type": "replace_prop_panel",
+  "project_id": "project-mqtrvwwh-351wt0",
+  "payload": {
+    "inputs": {
+      "image": {
+        // 源图资产。replace_prop_panel 推荐直接传 assets://，避免 multipart 源图重复上传。
+        "assetUri": "assets://renders/20260625-xt39k1kC.png"
+      }
+    },
+    // 使用 canonical panel id，worker 会映射到 PAI Studio 的 scene/shot/panel 路径。
+    "panelId": "ps001_sh001_p0001",
+    "workflow": "prop_replace_general_flux2_v1",
+    "replace": {
+      // 自动框选的目标描述。尽量写成图中可见物体，而不是最终要生成的新物体。
+      // 这个 case 用“舞狮的头部”比“狮子头”更稳定，能减少框到周围背景/其他道具的概率。
+      "sourceProp": "舞狮的头部",
+
+      // 正向指令必须同时说明“替换成什么”和“保持什么风格”。
+      // 如果只写“换成猪头”，Flux 容易套用彩色写实猪头先验。
+      "instruction": "把舞狮的头部换成一个猪头造型的舞狮头，保持原图黑白漫画线稿风格、灰度、笔触、光影、透视和构图一致，人物和背景不变"
+    },
+    "prompt": {
+      // 反向提示用于压住彩色、写实、3D、真实皮肤等常见跑偏方向。
+      "negativeText": "彩色，粉色，照片写实，三维渲染，真实皮肤，真实动物头，光滑塑料质感，人物改变，背景改变，线稿丢失，风格变化"
+    },
+    "params": {
+      // 局部重绘强度。0.44 比默认 0.56 更保守，更容易保留原图线稿和灰度风格。
+      "denoise": 0.44,
+
+      // mask 外扩像素。替换单个道具时保持小一点，避免影响人物和背景。
+      "growMask": 2,
+
+      // Flux guidance。略低于默认值，减少模型过度追逐“猪头”语义导致的写实化。
+      "guidance": 2.8,
+
+      // 采样步数。28 比默认 24 稍高，给低 denoise 下的局部细节一点空间。
+      "steps": 28,
+
+      // CFG。低 CFG 能减少风格漂移，更多依赖原图条件。
+      "cfg": 1.7,
+
+      // GroundingDINO 阈值。比默认略高，减少误框；如果漏框再往下调。
+      "groundConfidence": 0.1,
+      "groundTextThreshold": 0.16,
+
+      // precise 强制使用 SAM 精确 mask，不走长条 corridor 自动逻辑。
+      // 通用物品替换里，如果目标不是筷子/勺子这类长条物体，优先用 precise。
+      "maskMode": "precise"
+    }
+  }
+}
+```
+
+这组参数对应的结果资产：
+
+```text
+assets://renders/20260625-oqmAI6wQ.png
+```
 
 ## Add A New Task
 

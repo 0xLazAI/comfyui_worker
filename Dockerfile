@@ -24,6 +24,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    openssh-client \
     supervisor \
     tini \
     && rm -rf /var/lib/apt/lists/*
@@ -31,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY scripts ./scripts
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 COPY docker/start-service.sh /usr/local/bin/start-service.sh
 COPY docker/start-container.sh /usr/local/bin/start-container.sh

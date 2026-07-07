@@ -9,9 +9,11 @@ import type {
   TaskTypeDefinitionUpdateInput,
 } from './types.js';
 import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
+import { TRAIN_STYLE_LORA_CONSUMER_KEY, TRAIN_STYLE_LORA_TASK_TYPE } from '../train/loraTrainPayload.js';
 
 const DEFAULT_TASK_DEFINITION_DESCRIPTION = '默认的 render_panel 任务定义。';
 const DEFAULT_REPLACE_PROP_TASK_DEFINITION_DESCRIPTION = '默认的 replace_prop_panel 任务定义。';
+const DEFAULT_TRAIN_STYLE_LORA_TASK_DEFINITION_DESCRIPTION = '默认的 train_style_lora 风格 LoRA 训练任务定义。';
 const SYSTEM_ACTOR = 'system';
 
 export class TaskTypeDefinitionStore {
@@ -271,6 +273,11 @@ export class TaskTypeDefinitionStore {
       description: DEFAULT_REPLACE_PROP_TASK_DEFINITION_DESCRIPTION,
       definitionJson: defaultReplacePropPanelDefinitionJson(),
       requiredFieldPaths: ['params.maskMode'],
+    });
+    await this.ensureBuiltInDefinition({
+      taskType: TRAIN_STYLE_LORA_TASK_TYPE,
+      description: DEFAULT_TRAIN_STYLE_LORA_TASK_DEFINITION_DESCRIPTION,
+      definitionJson: defaultTrainStyleLoraDefinitionJson(),
     });
   }
 
@@ -556,6 +563,114 @@ function defaultReplacePropPanelDefinitionJson(): TaskDefinitionJson {
           default: 'auto',
           enum: ['auto', 'precise'],
           description: 'Mask 模式。auto 默认自动判断是否使用长条 corridor；precise 强制使用 SAM2 精确 mask。',
+        },
+      },
+    },
+  });
+}
+
+function defaultTrainStyleLoraDefinitionJson(): TaskDefinitionJson {
+  return normalizeTaskDefinitionJson({
+    consumer_key: TRAIN_STYLE_LORA_CONSUMER_KEY,
+    payload: {
+      allow_unknown_fields: false,
+      fields: {
+        mode: {
+          type: 'string',
+          required: true,
+          enum: ['initial', 'continue_weights'],
+          description: '训练模式：initial 初训；continue_weights 从已有 LoRA 权重继续训练。',
+        },
+        baseProfile: {
+          type: 'string',
+          required: true,
+          enum: ['flux2_dev_bf16', 'flux2_klein9b'],
+          description: '训练基座 profile。flux2_dev_bf16 产物给 flux2_dev_fp8mixed 推理；flux2_klein9b 产物给 Klein9B 工作流推理。',
+        },
+        'lora.name': {
+          type: 'string',
+          required: true,
+          description: '输出 LoRA 名称，不含路径。建议只用字母、数字、点、下划线、连字符。',
+        },
+        'lora.kind': {
+          type: 'string',
+          required: false,
+          default: 'style',
+          enum: ['style'],
+          description: 'LoRA 类型。第一版仅支持 style。',
+        },
+        'lora.trigger': {
+          type: 'string',
+          required: true,
+          description: '触发词，例如 dunhuangmap。',
+        },
+        'lora.description': {
+          type: 'string',
+          required: false,
+          description: '可选的人类可读描述。',
+        },
+        'dataset.uri': {
+          type: 'string',
+          required: true,
+          description: '训练集 S3 prefix。必须是单层平铺 image/txt pairs，例如 s3://bucket/path/to/dataset/。',
+        },
+        'continueFrom.loraPath': {
+          type: 'string',
+          required: false,
+          description: 'mode=continue_weights 时必填，训练机上的旧 LoRA 本地路径。',
+        },
+        'train.preset': {
+          type: 'string',
+          required: false,
+          description: '训练 preset 名称。不传时按 mode 使用 style 或 style_continue。',
+        },
+        'train.rank': {
+          type: 'integer',
+          required: false,
+          minimum: 1,
+          description: 'LoRA rank。不传时按 baseProfile 默认。',
+        },
+        'train.alpha': {
+          type: 'number',
+          required: false,
+          minimum: 0,
+          description: 'LoRA alpha。不传时按 baseProfile 默认。',
+        },
+        'train.steps': {
+          type: 'integer',
+          required: false,
+          minimum: 1,
+          description: '训练步数。不传时按 baseProfile + mode 默认。',
+        },
+        'train.lr': {
+          type: 'number',
+          required: false,
+          minimum: 0,
+          description: '学习率。不传时按 baseProfile + mode 默认。',
+        },
+        'train.seed': {
+          type: 'integer',
+          required: false,
+          minimum: 0,
+          description: '随机种子，默认 42。',
+        },
+        'train.saveEvery': {
+          type: 'integer',
+          required: false,
+          minimum: 1,
+          description: 'checkpoint 保存间隔，不传默认 500。',
+        },
+        'publish.mode': {
+          type: 'string',
+          required: false,
+          default: 'local',
+          enum: ['local'],
+          description: '发布模式。第一版仅登记训练机本地路径，不上传 S3。',
+        },
+        'publish.filename': {
+          type: 'string',
+          required: false,
+          description: '最终文件名，默认 <lora.name>.safetensors。',
         },
       },
     },

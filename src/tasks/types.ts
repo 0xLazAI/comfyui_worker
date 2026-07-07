@@ -19,6 +19,8 @@ export type WorkerTaskEventType =
   | 'started'
   | 'provider_submitted'
   | 'provider_polled'
+  | 'trainer_submitted'
+  | 'trainer_polled'
   | 'asset_uploaded'
   | 'metadata_written'
   | 'retry_scheduled'
