@@ -107,6 +107,20 @@ export const LORA_TRAINER_POLL_INTERVAL_SECONDS = integer(
 );
 export const STEPHEN_RENDER_BASE_URL = pick(process.env.STEPHEN_RENDER_BASE_URL);
 export const STEPHEN_RENDER_PROJECT_ID = 'kumarajiva';
+// PAILang studio — the three-view → 3D (Hunyuan3D-mv) backend, called over its
+// /api/modeling HTTP surface (upload views → submit → poll → download GLB). Same
+// studio host as Stephen render; falls back to STEPHEN_RENDER_BASE_URL when unset.
+export const PAILANG_STUDIO_BASE_URL = pick(
+  process.env.PAILANG_STUDIO_BASE_URL,
+  process.env.STEPHEN_RENDER_BASE_URL,
+  'http://34.215.238.232:8911',
+);
+export const HUNYUAN3D_MODELING_WORKFLOW = pick(process.env.HUNYUAN3D_MODELING_WORKFLOW, 'hunyuan3d_mv');
+export const HUNYUAN3D_MODELING_POLL_INTERVAL_SECONDS = integer(
+  pick(process.env.HUNYUAN3D_MODELING_POLL_INTERVAL_SECONDS, '5'),
+  5,
+  1,
+);
 export const PAI_ASSET_ENDPOINT = pick(process.env.PAI_ASSET_ENDPOINT);
 export const PAI_ASSET_BUCKET = pick(process.env.PAI_ASSET_BUCKET);
 export const PAI_ASSET_REGION = pick(process.env.PAI_ASSET_REGION, 'us-east-1');

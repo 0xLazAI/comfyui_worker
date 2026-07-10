@@ -6,12 +6,17 @@ import { getStephenRenderStatus } from '../render/stephenRenderClient.js';
 import { writeStoryboardOutputSidecar } from '../render/storyboardOutputs.js';
 import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
 import { TRAIN_STYLE_LORA_TASK_TYPE } from '../train/loraTrainPayload.js';
+import { THREE_VIEW_3D_TASK_TYPE } from '../model3d/threeViewPayload.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
 import { readTaskDefinitionBinding } from '../taskDefinitions/definitionSchema.js';
 import {
   handleTrainStyleLoraExecute,
   TRAIN_STYLE_LORA_CONSUMER_KEY,
 } from './loraTrainTaskExecution.js';
+import {
+  handleThreeView3dExecute,
+  THREE_VIEW_3D_CONSUMER_KEY,
+} from './threeView3dTaskExecution.js';
 import { handleReplacePropPanelExecute, REPLACE_PROP_PANEL_CONSUMER_KEY } from './replacePropTaskExecution.js';
 import { enqueueTaskRecord } from './taskScheduler.js';
 import { taskStore } from './taskStore.js';
@@ -583,6 +588,9 @@ function defaultConsumerKeyForTaskType(taskType: string): string {
   if (normalized === TRAIN_STYLE_LORA_TASK_TYPE) {
     return TRAIN_STYLE_LORA_CONSUMER_KEY;
   }
+  if (normalized === THREE_VIEW_3D_TASK_TYPE) {
+    return THREE_VIEW_3D_CONSUMER_KEY;
+  }
   return '';
 }
 
@@ -590,4 +598,5 @@ const CONSUMER_HANDLERS: Record<string, ConsumerHandler> = {
   [RENDER_PANEL_CONSUMER_KEY]: handleRenderPanelExecute,
   [REPLACE_PROP_PANEL_CONSUMER_KEY]: handleReplacePropPanelExecute,
   [TRAIN_STYLE_LORA_CONSUMER_KEY]: handleTrainStyleLoraExecute,
+  [THREE_VIEW_3D_CONSUMER_KEY]: handleThreeView3dExecute,
 };

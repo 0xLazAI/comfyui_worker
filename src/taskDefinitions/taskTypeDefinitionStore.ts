@@ -10,10 +10,12 @@ import type {
 } from './types.js';
 import { REPLACE_PROP_PANEL_TASK_TYPE, RENDER_PANEL_TASK_TYPE } from '../render/workflowCatalog.js';
 import { TRAIN_STYLE_LORA_CONSUMER_KEY, TRAIN_STYLE_LORA_TASK_TYPE } from '../train/loraTrainPayload.js';
+import { THREE_VIEW_3D_CONSUMER_KEY, THREE_VIEW_3D_TASK_TYPE } from '../model3d/threeViewPayload.js';
 
 const DEFAULT_TASK_DEFINITION_DESCRIPTION = '默认的 render_panel 任务定义。';
 const DEFAULT_REPLACE_PROP_TASK_DEFINITION_DESCRIPTION = '默认的 replace_prop_panel 任务定义。';
 const DEFAULT_TRAIN_STYLE_LORA_TASK_DEFINITION_DESCRIPTION = '默认的 train_style_lora 风格 LoRA 训练任务定义。';
+const DEFAULT_THREE_VIEW_3D_TASK_DEFINITION_DESCRIPTION = '默认的 hunyuan3d_three_view 三视图生成 3D 模型任务定义。';
 const SYSTEM_ACTOR = 'system';
 
 export class TaskTypeDefinitionStore {
@@ -278,6 +280,11 @@ export class TaskTypeDefinitionStore {
       taskType: TRAIN_STYLE_LORA_TASK_TYPE,
       description: DEFAULT_TRAIN_STYLE_LORA_TASK_DEFINITION_DESCRIPTION,
       definitionJson: defaultTrainStyleLoraDefinitionJson(),
+    });
+    await this.ensureBuiltInDefinition({
+      taskType: THREE_VIEW_3D_TASK_TYPE,
+      description: DEFAULT_THREE_VIEW_3D_TASK_DEFINITION_DESCRIPTION,
+      definitionJson: defaultThreeView3dDefinitionJson(),
     });
   }
 
@@ -671,6 +678,73 @@ function defaultTrainStyleLoraDefinitionJson(): TaskDefinitionJson {
           type: 'string',
           required: false,
           description: '最终文件名，默认 <lora.name>.safetensors。',
+        },
+      },
+    },
+  });
+}
+
+function defaultThreeView3dDefinitionJson(): TaskDefinitionJson {
+  return normalizeTaskDefinitionJson({
+    consumer_key: THREE_VIEW_3D_CONSUMER_KEY,
+    payload: {
+      allow_unknown_fields: false,
+      fields: {
+        'views.front.assetUri': {
+          type: 'string',
+          required: true,
+          description: '正面视图图片的 assets:// URI（必需）。',
+        },
+        'views.left.assetUri': {
+          type: 'string',
+          required: false,
+          description: '左视图图片的 assets:// URI（可选）。',
+        },
+        'views.right.assetUri': {
+          type: 'string',
+          required: false,
+          description: '右视图图片的 assets:// URI（可选）。',
+        },
+        'views.back.assetUri': {
+          type: 'string',
+          required: false,
+          description: '背面视图图片的 assets:// URI（可选）。',
+        },
+        'target.entityKind': {
+          type: 'string',
+          required: true,
+          enum: ['prop', 'character'],
+          description: '产物挂到哪类资产台账：prop 道具 / character 角色。',
+        },
+        'target.entityId': {
+          type: 'string',
+          required: true,
+          description: '目标实体 id，例如 prop_oil_lamp（须已存在于对应台账）。',
+        },
+        'target.depictionIndex': {
+          type: 'integer',
+          required: false,
+          minimum: 0,
+          description: '可选：挂到实体某个 depiction 的 model3d，而非实体级 model3d。',
+        },
+        preset: {
+          type: 'string',
+          required: false,
+          default: 'standard',
+          enum: ['fast', 'standard'],
+          description: 'fast=快速预览(50k 面)；standard=最终产物(120k 面)。',
+        },
+        seed: {
+          type: 'integer',
+          required: false,
+          minimum: 0,
+          description: '随机种子（可选，省略则由资产派生）。',
+        },
+        maxFaces: {
+          type: 'integer',
+          required: false,
+          minimum: 1000,
+          description: '覆盖 preset 的目标面数（可选）。',
         },
       },
     },
