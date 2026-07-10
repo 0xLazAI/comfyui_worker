@@ -400,6 +400,8 @@ assets://renders/20260625-oqmAI6wQ.png
 
 结果 `result`:`{ model3dUri, entityId, ledgerPath, ledgerPointer, faces, verts, dimensions }`。相关环境变量见 `.env.example`(`PAILANG_STUDIO_BASE_URL` 等)。
 
+> 完整接入指南(参数表、生命周期、结果读取、幂等/错误、端到端示例)见 [`docs/hunyuan3d-three-view-integration.md`](docs/hunyuan3d-three-view-integration.md)。
+
 ## Add A New Task
 
 这套 worker 现在不是把 `task_type` 写死在 HTTP 路由里，而是拆成两层：
