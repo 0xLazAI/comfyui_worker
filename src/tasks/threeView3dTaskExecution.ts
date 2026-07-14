@@ -1,5 +1,7 @@
 import {
+  HUNYUAN3D_MODELING_MAX_DURATION_SECONDS,
   HUNYUAN3D_MODELING_POLL_INTERVAL_SECONDS,
+  HUNYUAN3D_MODELING_WORKFLOW,
 } from '../infra/constants.js';
 import { ValidationError } from '../infra/HttpError.js';
 import {
@@ -10,6 +12,7 @@ import {
   type ModelingStatusResult,
 } from '../model3d/hunyuan3dClient.js';
 import { registerEntityModel3d } from '../model3d/entityLedger.js';
+import { sliceTurnaround } from '../model3d/turnaroundSlice.js';
 import {
   attachHunyuan3dRuntimeState,
   getHunyuan3dRuntimeState,
@@ -110,12 +113,15 @@ async function submitModelingTask(
     message: 'hunyuan3d_three_view submission started',
   });
 
-  // Stage each view onto the studio: download the assets:// image, upload to
-  // /api/modeling/upload, collect the returned image_path per slot.
+  // Resolve per-view PNG buffers (Mode A: slice a turnaround sheet; Mode B: use the
+  // pre-sliced assets://views), then stage each onto the studio via /api/modeling/upload.
+  const viewImages = await resolveViewImages(payload);
+  if (!viewImages.front) {
+    throw new ValidationError('no front view could be resolved for modeling');
+  }
   const viewPaths: Partial<Record<ViewSlot, string>> = {};
-  for (const [slot, view] of Object.entries(payload.views) as Array<[ViewSlot, { assetUri: string }]>) {
-    const asset = await downloadAsset(payload.projectId, view.assetUri);
-    viewPaths[slot] = await uploadModelingView(slot, asset.filename, asset.buffer, asset.contentType);
+  for (const [slot, image] of Object.entries(viewImages) as Array<[ViewSlot, ViewImage]>) {
+    viewPaths[slot] = await uploadModelingView(slot, image.filename, image.buffer, image.contentType);
   }
 
   const submitted = await submitModelingJob({
@@ -170,6 +176,44 @@ async function submitModelingTask(
   });
 }
 
+interface ViewImage {
+  filename: string;
+  buffer: Buffer;
+  contentType: string;
+}
+
+/**
+ * Resolve the per-view PNG images to feed the 3D backend, keyed by PAILang view slot.
+ *
+ * Mode A (turnaround sheet): download the sheet and slice it by whitespace projection into
+ * per-view buffers. The slices are transient modeling inputs — not persisted as PACE assets.
+ * Mode B (pre-sliced views): download each assets:// view image directly.
+ */
+async function resolveViewImages(
+  payload: NormalizedThreeView3dPayload,
+): Promise<Partial<Record<ViewSlot, ViewImage>>> {
+  if (payload.turnaround) {
+    const sheet = await downloadAsset(payload.projectId, payload.turnaround.assetUri);
+    const { views } = await sliceTurnaround(sheet.buffer, payload.target.entityKind);
+    const images: Partial<Record<ViewSlot, ViewImage>> = {};
+    for (const [slot, buffer] of Object.entries(views) as Array<[ViewSlot, Buffer]>) {
+      images[slot] = {
+        filename: `${payload.target.entityId}_${slot}.png`,
+        buffer,
+        contentType: 'image/png',
+      };
+    }
+    return images;
+  }
+
+  const images: Partial<Record<ViewSlot, ViewImage>> = {};
+  for (const [slot, view] of Object.entries(payload.views) as Array<[ViewSlot, { assetUri: string }]>) {
+    const asset = await downloadAsset(payload.projectId, view.assetUri);
+    images[slot] = { filename: asset.filename, buffer: asset.buffer, contentType: asset.contentType };
+  }
+  return images;
+}
+
 async function reconcileModelingTask(
   record: WorkerTaskRecord,
   payload: NormalizedThreeView3dPayload,
@@ -220,6 +264,26 @@ async function reconcileModelingTask(
   if (TERMINAL_SUCCESS.has(normalizedStatus)) {
     await finalizeModelingTask(record, payload, jobId, requestPayloadWithRuntime, status, context);
     return;
+  }
+
+  // Deadline guard: stop re-enqueuing once the job has polled past the max duration,
+  // otherwise a studio job stuck in a non-terminal state would loop forever.
+  const submittedAtMs = runtime.submittedAt ? Date.parse(runtime.submittedAt) : NaN;
+  if (Number.isFinite(submittedAtMs)) {
+    const elapsedSeconds = Math.round((Date.now() - submittedAtMs) / 1000);
+    if (elapsedSeconds > HUNYUAN3D_MODELING_MAX_DURATION_SECONDS) {
+      await markModelingFailed(
+        record,
+        {
+          ...status,
+          status: 'failed',
+          error: `modeling timed out after ${elapsedSeconds}s (limit ${HUNYUAN3D_MODELING_MAX_DURATION_SECONDS}s)`,
+        },
+        requestPayloadWithRuntime,
+        context,
+      );
+      return;
+    }
   }
 
   const delaySeconds = HUNYUAN3D_MODELING_POLL_INTERVAL_SECONDS;
@@ -276,6 +340,8 @@ async function finalizeModelingTask(
     entityId: payload.target.entityId,
     depictionIndex: payload.target.depictionIndex,
     assetUri: uploaded.assetUri,
+    backend: `pailang:${HUNYUAN3D_MODELING_WORKFLOW}`,
+    jobId,
   });
 
   const result = {

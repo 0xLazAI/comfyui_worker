@@ -12,6 +12,15 @@ export type ViewSlot = (typeof VIEW_SLOTS)[number];
 export interface NormalizedThreeView3dPayload {
   taskId: string;
   projectId: string;
+  /**
+   * Mode A input: a turnaround *sheet* (one image with several views in a row) that the
+   * worker slices into per-view images. Null when the caller supplies pre-sliced `views`.
+   */
+  turnaround: { assetUri: string } | null;
+  /**
+   * Mode B input: pre-sliced per-view images. Empty when the caller supplies a `turnaround`
+   * sheet instead (the worker fills this in after slicing).
+   */
   views: Partial<Record<ViewSlot, { assetUri: string }>>;
   target: {
     entityKind: EntityKind;
@@ -30,7 +39,15 @@ export function hydrateThreeView3dPayload(
     projectId: string;
   },
 ): NormalizedThreeView3dPayload {
+  const turnaround = normalizeTurnaround(payload.turnaround);
   const views = normalizeViews(payload.views);
+  // Mode A (turnaround sheet) OR Mode B (pre-sliced views) — at least one is required.
+  // When both are given, pre-sliced views win and the sheet is ignored.
+  if (!turnaround && !views.front) {
+    throw new ValidationError(
+      'payload requires either turnaround.assetUri (a sheet to slice) or views.front (a pre-sliced view)',
+    );
+  }
   const target = normalizeTarget(payload.target);
   const preset = normalizePreset(payload.preset);
   const seed = optionalInteger(payload.seed, 'payload.seed', 0);
@@ -39,6 +56,7 @@ export function hydrateThreeView3dPayload(
   return {
     taskId: context.taskId,
     projectId: context.projectId,
+    turnaround: views.front ? null : turnaround,
     views,
     target,
     preset,
@@ -47,9 +65,24 @@ export function hydrateThreeView3dPayload(
   };
 }
 
+function normalizeTurnaround(value: unknown): { assetUri: string } | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const spec = requireObject(value, 'payload.turnaround');
+  const assetUri = requireString(spec.assetUri, 'payload.turnaround.assetUri');
+  if (!assetUri.startsWith('assets://')) {
+    throw new ValidationError('payload.turnaround.assetUri must start with assets://');
+  }
+  return { assetUri };
+}
+
 function normalizeViews(value: unknown): NormalizedThreeView3dPayload['views'] {
-  const source = requireObject(value, 'payload.views');
   const views: NormalizedThreeView3dPayload['views'] = {};
+  if (value === undefined || value === null) {
+    return views; // views omitted → caller must supply a turnaround sheet
+  }
+  const source = requireObject(value, 'payload.views');
   for (const slot of VIEW_SLOTS) {
     const spec = source[slot];
     if (spec === undefined || spec === null) {
@@ -61,9 +94,6 @@ function normalizeViews(value: unknown): NormalizedThreeView3dPayload['views'] {
       throw new ValidationError(`payload.views.${slot}.assetUri must start with assets://`);
     }
     views[slot] = { assetUri };
-  }
-  if (!views.front) {
-    throw new ValidationError('payload.views.front is required');
   }
   return views;
 }

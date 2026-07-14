@@ -690,10 +690,15 @@ function defaultThreeView3dDefinitionJson(): TaskDefinitionJson {
     payload: {
       allow_unknown_fields: false,
       fields: {
+        'turnaround.assetUri': {
+          type: 'string',
+          required: false,
+          description: '模式A：三视图整图 sheet 的 assets:// URI，worker 内部切片。与 views 二选一。',
+        },
         'views.front.assetUri': {
           type: 'string',
-          required: true,
-          description: '正面视图图片的 assets:// URI（必需）。',
+          required: false,
+          description: '模式B：正面单视图的 assets:// URI。与 turnaround 二选一（提供 views 时 front 必填，由 worker 校验）。',
         },
         'views.left.assetUri': {
           type: 'string',

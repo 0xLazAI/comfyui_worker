@@ -1,10 +1,15 @@
 # `hunyuan3d_three_view` 接入指南
 
-三视图 → 3D 模型任务的调用方接入文档。任务把某角色/道具的 3–4 张正交视图生成一个 3D 模型(GLB),并把产物注册进该实体的**资产台账**(`entities/props.json` / `characters.json` 的 `model3d` 件槽)。
+三视图 → 3D 模型任务的调用方接入文档。任务把某实体的正交视图生成一个 3D 模型(GLB),并把产物注册进该实体的**资产台账**(`entities/characters.json` / `props.json` 的 `model3d` 件槽 + 项目 `manifest.json` 的 `asset_model3d` artifact take)。
+
+**两种输入模式(二选一):**
+- **模式 A(推荐):传一张三视图整图 sheet**(`turnaround.assetUri`)。worker 内部按白列投影把整图切成单视图(角色 = 正/侧/背三视 → front/left/back),切片是临时中间产物,不落台账。这正对接 storyboard-tool `complete_entity_assets` 生成的 turnaround。
+- **模式 B:传已切好的单视图**(`views.front/left/right/back`)。
 
 - `task_type`:`hunyuan3d_three_view`
-- 产物:`assets://entity-models/<date>-<rand>.glb`,并写入目标实体 `model3d`
+- 产物:`assets://entity-models/<date>-<rand>.glb`,写入目标实体 `model3d` 件槽 + append 一条 `asset_model3d` take(`current`)
 - 后端:PAILang studio `/api/modeling`(workflow `hunyuan3d_mv`)——worker 内部调用,调用方无需关心
+- 建模对象:当前主要用于 **character**(角色);prop/location 不建模
 
 ---
 
@@ -26,15 +31,19 @@
   "task_type": "hunyuan3d_three_view",
   "project_id": "demo-local",
   "payload": {
-    "views": {
-      "front": { "assetUri": "assets://entity-images/....png" },   // 必需
-      "left":  { "assetUri": "assets://entity-images/....png" },   // 可选
-      "right": { "assetUri": "assets://entity-images/....png" },   // 可选
-      "back":  { "assetUri": "assets://entity-images/....png" }    // 可选
-    },
+    // —— 模式 A:整图 sheet(worker 内部切片)——
+    "turnaround": { "assetUri": "assets://entity-images/char_yan_turnaround.png" },
+
+    // —— 或 模式 B:预切单视图(与 turnaround 二选一;两者都给以 views 优先)——
+    // "views": {
+    //   "front": { "assetUri": "assets://entity-images/....png" },   // 提供 views 时必需
+    //   "left":  { "assetUri": "assets://entity-images/....png" },   // 可选
+    //   "right": { "assetUri": "assets://entity-images/....png" },   // 可选
+    //   "back":  { "assetUri": "assets://entity-images/....png" }    // 可选
+    // },
     "target": {
-      "entityKind": "prop",           // prop | character
-      "entityId": "prop_oil_lamp",    // 台账里的实体 id(须已存在)
+      "entityKind": "character",      // character(主)| prop
+      "entityId": "char_yan_liang",   // 台账里的实体 id(须已存在)
       "depictionIndex": 0              // 可选:挂到某个 depiction 的 model3d,而非实体级
     },
     "preset": "standard",             // 可选:fast | standard(默认 standard)
@@ -48,16 +57,17 @@
 
 | 字段 | 必需 | 类型 | 说明 |
 |---|---|---|---|
-| `views.front.assetUri` | 是 | string | 正面视图 `assets://` URI |
-| `views.left/right/back.assetUri` | 否 | string | 其余视图 `assets://` URI;越全,侧/背面结构越准 |
-| `target.entityKind` | 是 | enum | `prop` / `character` |
+| `turnaround.assetUri` | 二选一 | string | 模式 A:三视图整图 sheet 的 `assets://` URI,worker 内部切片 |
+| `views.front.assetUri` | 二选一 | string | 模式 B:正面单视图 `assets://` URI(提供 views 时必需) |
+| `views.left/right/back.assetUri` | 否 | string | 其余单视图 `assets://` URI;越全,侧/背面结构越准 |
+| `target.entityKind` | 是 | enum | `character`(主)/ `prop` |
 | `target.entityId` | 是 | string | 目标实体 id(须已存在) |
 | `target.depictionIndex` | 否 | int≥0 | 挂到实体某个 depiction 的 `model3d` |
 | `preset` | 否 | enum | `fast`(50k 面,快)/ `standard`(120k 面,默认) |
 | `seed` | 否 | int≥0 | 随机种子 |
 | `maxFaces` | 否 | int≥1000 | 覆盖 preset 的目标面数 |
 
-> 校验分两层:平台的 task 定义 schema(`hunyuan3d_three_view` 内置定义)先做类型/必填/枚举校验,worker 端 `hydrateThreeView3dPayload` 再做边界校验(front 必需、URI 必须 `assets://` 等)。非法输入直接 `rejected`。
+> 校验分两层:平台的 task 定义 schema(`hunyuan3d_three_view` 内置定义)先做类型/枚举校验;字段级 schema 无法表达 turnaround/views「二选一」,故由 worker 端 `hydrateThreeView3dPayload` 兜底(turnaround 或 views.front 至少给一个、URI 必须 `assets://` 等)。非法输入直接 `rejected`。
 
 ---
 
@@ -69,9 +79,9 @@ worker 内部是"自提交轮询"模型,调用方只需轮询任务状态:
 
 内部阶段(体现在 `progress` 和事件流里,调用方可忽略细节):
 
-1. **submit**:下载各视图 → 上传到 studio → `POST /api/modeling` 提交 → 记录 jobId → 重新入队。
-2. **poll**:轮询 `/api/modeling/{job}`,未完成则每几秒重入队一次。
-3. **finalize**:下载 GLB → 上传为 `ENTITY_MODEL_3D` 资产 → `writePaceFiles` patch 实体 `model3d` → `succeeded`。
+1. **submit**:解析视图(模式 A 下载整图并切片;模式 B 下载各单视图)→ 上传到 studio → `POST /api/modeling` 提交 → 记录 jobId → 重新入队。
+2. **poll**:轮询 `/api/modeling/{job}`,未完成则每几秒重入队一次;超过 `HUNYUAN3D_MODELING_MAX_DURATION_SECONDS`(默认 30 分钟)仍未终态 → `failed`(超时),不再无限重入队。
+3. **finalize**:下载 GLB → 上传为 `ENTITY_MODEL_3D` 资产 → 一次 `writePaceFiles` 原子写(append `asset_model3d` take 置 `current` + 同组旧 current 置 false + 镜像实体 `model3d` 件槽)→ `succeeded`。
 
 事件类型(`GET /tasks/{task_id}/events` 若有):`started` → `model3d_submitted` → `model3d_polled`(多次)→ `succeeded` / `failed`。
 
@@ -97,11 +107,14 @@ standard 档整体约 1–2 分钟(取决于 GPU 排队),fast 更快。
 }
 ```
 
-> `result` 只是**状态摘要**,不是台账真值。真值是台账文件里被 patch 的 `model3d` 件槽:
+> `result` 只是**状态摘要**,不是台账真值。真值有两处(一次原子写):
 > ```jsonc
-> // entities/props.json 中该实体
-> "model3d": { "status": "ready", "uri": "assets://entity-models/....glb", "source": "generated", "group": "asset_model3d:prop_oil_lamp", "versionId": "take1" }
+> // 1) entities/characters.json 中该实体的件槽(镜像 current take)
+> "model3d": { "status": "ready", "uri": "assets://entity-models/....glb", "source": "generated", "group": "asset_model3d:char_yan_liang", "versionId": "asset_take_1_af47c2" }
+> // 2) 项目 manifest.json 的 artifacts[] 追加一条 take(append-only + 血缘)
+> { "kind": "asset_model3d", "ref": "char_yan_liang", "uri": "assets://...glb", "versionId": "asset_take_1_af47c2", "current": true, "supersedesId": null, "source": "worker_generated", "status": "ready", "mediaType": "model/gltf-binary", "createdAt": "..." }
 > ```
+> 重生成不覆盖:append 新 take(`asset_take_2...`,`supersedesId` 指上一条)、置 `current`,旧 take `current=false`;件槽 `versionId` 跟着指向新 current。
 > 读回 GLB:用 `model3dUri`(或台账里的 `uri`)向平台换短期下载 URL(`assetUrl` / `GET /api/{project}/assets/url?assets_uri=...`)。`dimensions` 可直接用于 3D 故事版摆放(见字段说明:Y 向上,尺寸已归一化)。
 
 ---
@@ -113,6 +126,7 @@ standard 档整体约 1–2 分钟(取决于 GPU 排队),fast 更快。
 | `PAILANG_STUDIO_BASE_URL` | 回退 `STEPHEN_RENDER_BASE_URL`,否则 `http://34.215.238.232:8911` | 3D 后端 studio 地址(与 Stephen render 同一台) |
 | `HUNYUAN3D_MODELING_WORKFLOW` | `hunyuan3d_mv` | 提交给 `/api/modeling` 的 workflow id |
 | `HUNYUAN3D_MODELING_POLL_INTERVAL_SECONDS` | `5` | 轮询间隔 |
+| `HUNYUAN3D_MODELING_MAX_DURATION_SECONDS` | `1800` | 轮询超时上限;超过即 `failed`,避免无限重入队 |
 
 > studio 若是自签证书的 https,worker 需设 `NODE_TLS_REJECT_UNAUTHORIZED=0`,或把 `PAILANG_STUDIO_BASE_URL` 指到可直连的 http。
 
@@ -120,9 +134,9 @@ standard 档整体约 1–2 分钟(取决于 GPU 排队),fast 更快。
 
 ## 6. 幂等与错误
 
-- **幂等**:同 `task_id` 重试安全;台账写回用 `REPLACE model3d`(覆盖同一件槽,不重复追加)。
+- **幂等**:同 `task_id` 重试安全;件槽写回用 `add`(首次即成功,不要求路径预先存在);重生成走 append-only take + `current` 切换,可回溯历史版本。
 - **实体不存在**:`target.entityId` 不在台账 → `failed`(`entity ... not found`)。
-- **校验失败**:缺 front / 非 `assets://` / 非法 `entityKind` → `rejected`。
+- **校验失败**:turnaround 与 views 都没给 / URI 非 `assets://` / 非法 `entityKind` → `rejected`。
 - **后端失败**:`/api/modeling` job 报错或连不上 → `failed`,`result` 带 `modeling_failed` / `modeling_request_failed`。
 
 ---

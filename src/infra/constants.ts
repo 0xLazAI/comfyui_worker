@@ -121,6 +121,13 @@ export const HUNYUAN3D_MODELING_POLL_INTERVAL_SECONDS = integer(
   5,
   1,
 );
+// Upper bound on how long we keep polling a modeling job before giving up (default 30 min).
+// Prevents an unbounded re-enqueue loop when the studio job hangs in a non-terminal state.
+export const HUNYUAN3D_MODELING_MAX_DURATION_SECONDS = integer(
+  pick(process.env.HUNYUAN3D_MODELING_MAX_DURATION_SECONDS, '1800'),
+  1800,
+  60,
+);
 export const PAI_ASSET_ENDPOINT = pick(process.env.PAI_ASSET_ENDPOINT);
 export const PAI_ASSET_BUCKET = pick(process.env.PAI_ASSET_BUCKET);
 export const PAI_ASSET_REGION = pick(process.env.PAI_ASSET_REGION, 'us-east-1');
