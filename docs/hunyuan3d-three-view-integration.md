@@ -123,12 +123,12 @@ standard 档整体约 1–2 分钟(取决于 GPU 排队),fast 更快。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PAILANG_STUDIO_BASE_URL` | 回退 `STEPHEN_RENDER_BASE_URL`,否则 `http://34.215.238.232:8911` | 3D 后端 studio 地址(与 Stephen render 同一台) |
+| `STEPHEN_RENDER_BASE_URL` | (必填) | 3D 建模 studio 地址,复用 Stephen render 同一台(`/api/modeling` 接口)。不再有独立的 `PAILANG_STUDIO_BASE_URL` |
 | `HUNYUAN3D_MODELING_WORKFLOW` | `hunyuan3d_mv` | 提交给 `/api/modeling` 的 workflow id |
 | `HUNYUAN3D_MODELING_POLL_INTERVAL_SECONDS` | `5` | 轮询间隔 |
 | `HUNYUAN3D_MODELING_MAX_DURATION_SECONDS` | `1800` | 轮询超时上限;超过即 `failed`,避免无限重入队 |
 
-> studio 若是自签证书的 https,worker 需设 `NODE_TLS_REJECT_UNAUTHORIZED=0`,或把 `PAILANG_STUDIO_BASE_URL` 指到可直连的 http。
+> studio 若是自签证书的 https,worker 需设 `NODE_TLS_REJECT_UNAUTHORIZED=0`,或把 `STEPHEN_RENDER_BASE_URL` 指到可直连的 http。
 
 ---
 

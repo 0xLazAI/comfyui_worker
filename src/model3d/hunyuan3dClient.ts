@@ -1,6 +1,6 @@
 import {
   HUNYUAN3D_MODELING_WORKFLOW,
-  PAILANG_STUDIO_BASE_URL,
+  STEPHEN_RENDER_BASE_URL,
 } from '../infra/constants.js';
 import type { ViewSlot } from './threeViewPayload.js';
 
@@ -110,7 +110,7 @@ export async function downloadModelingGlb(jobId: string): Promise<Buffer> {
 }
 
 function buildUrl(path: string): string {
-  return `${String(PAILANG_STUDIO_BASE_URL || '').replace(/\/+$/, '')}${path}`;
+  return `${String(STEPHEN_RENDER_BASE_URL || '').replace(/\/+$/, '')}${path}`;
 }
 
 async function readJson(response: Response, label: string): Promise<Record<string, unknown>> {

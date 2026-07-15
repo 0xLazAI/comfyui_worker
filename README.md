@@ -398,7 +398,7 @@ assets://renders/20260625-oqmAI6wQ.png
 4. `createAssetUploadUrl(ENTITY_MODEL_3D)` + PUT 上传 → `assets://entity-models/....glb`。
 5. `writePaceFiles` `REPLACE` 目标实体的 `model3d` 件槽为 `{status:"ready", uri, source:"generated", ...}`。
 
-结果 `result`:`{ model3dUri, entityId, ledgerPath, ledgerPointer, faces, verts, dimensions }`。相关环境变量见 `.env.example`(`PAILANG_STUDIO_BASE_URL` 等)。
+结果 `result`:`{ model3dUri, entityId, ledgerPath, ledgerPointer, faces, verts, dimensions }`。相关环境变量见 `.env.example`(建模 studio 复用 `STEPHEN_RENDER_BASE_URL`)。
 
 > 完整接入指南(参数表、生命周期、结果读取、幂等/错误、端到端示例)见 [`docs/hunyuan3d-three-view-integration.md`](docs/hunyuan3d-three-view-integration.md)。
 
