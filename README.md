@@ -51,6 +51,7 @@
 - `task_type = render_panel`
 - `task_type = replace_prop_panel`
 - `task_type = train_style_lora`
+- `task_type = hunyuan3d_three_view`
 
 `payload` 采用通用结构：
 
@@ -359,6 +360,47 @@ LORA_TRAINER_SYNC_LOCK_FILE=/home/ubuntu/sd/lora-trainer/.sync.lock
 ```text
 assets://renders/20260625-oqmAI6wQ.png
 ```
+
+### `hunyuan3d_three_view` 三视图生成 3D 模型
+
+`hunyuan3d_three_view` 用某角色/道具的 3–4 张正交视图生成 3D 模型(GLB),并把产物注册进该实体的**资产台账 `model3d` 件槽**。worker 只管理生命周期:把视图交给 PAILang studio 的 `/api/modeling`(workflow `hunyuan3d_mv`)执行,轮询完成后下载 GLB → 上传为 `ENTITY_MODEL_3D` 资产 → `writePaceFiles` patch 实体 `model3d`。
+
+请求 payload:
+
+```jsonc
+{
+  "task_type": "hunyuan3d_three_view",
+  "project_id": "demo-local",
+  "payload": {
+    "views": {
+      "front": { "assetUri": "assets://entity-images/....png" },  // 必需
+      "left":  { "assetUri": "assets://..." },                    // 可选
+      "right": { "assetUri": "assets://..." },                    // 可选
+      "back":  { "assetUri": "assets://..." }                     // 可选
+    },
+    "target": {
+      "entityKind": "prop",          // prop | character
+      "entityId": "prop_oil_lamp",   // 须已存在于 entities/props.json | characters.json
+      "depictionIndex": 0             // 可选:挂到某个 depiction 的 model3d
+    },
+    "preset": "standard",            // 可选 fast | standard(默认 standard)
+    "seed": 42,                      // 可选
+    "maxFaces": 120000               // 可选
+  }
+}
+```
+
+执行流程:
+
+1. 对每个视图 `downloadAsset` → `POST /api/modeling/upload` 拿 `image_path`。
+2. `POST /api/modeling` 提交,轮询 `GET /api/modeling/{job}` 到终态。
+3. `GET /api/modeling/{job}/model.glb` 下载 GLB。
+4. `createAssetUploadUrl(ENTITY_MODEL_3D)` + PUT 上传 → `assets://entity-models/....glb`。
+5. `writePaceFiles` `REPLACE` 目标实体的 `model3d` 件槽为 `{status:"ready", uri, source:"generated", ...}`。
+
+结果 `result`:`{ model3dUri, entityId, ledgerPath, ledgerPointer, faces, verts, dimensions }`。相关环境变量见 `.env.example`(`PAILANG_STUDIO_BASE_URL` 等)。
+
+> 完整接入指南(参数表、生命周期、结果读取、幂等/错误、端到端示例)见 [`docs/hunyuan3d-three-view-integration.md`](docs/hunyuan3d-three-view-integration.md)。
 
 ## Add A New Task
 

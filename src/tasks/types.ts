@@ -21,6 +21,8 @@ export type WorkerTaskEventType =
   | 'provider_polled'
   | 'trainer_submitted'
   | 'trainer_polled'
+  | 'model3d_submitted'
+  | 'model3d_polled'
   | 'asset_uploaded'
   | 'metadata_written'
   | 'retry_scheduled'

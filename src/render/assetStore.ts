@@ -93,6 +93,20 @@ export async function uploadSourceImageAsset(
   return uploadAsset(projectId, 'uploads', input);
 }
 
+export async function uploadEntityModelAsset(
+  projectId: string,
+  input: {
+    buffer: Buffer;
+    filenameHint?: string;
+  },
+): Promise<UploadedAsset> {
+  return uploadAsset(projectId, 'entity-models', {
+    buffer: input.buffer,
+    contentType: 'model/gltf-binary',
+    filenameHint: input.filenameHint,
+  });
+}
+
 async function uploadAsset(
   projectId: string,
   assetGroup: string,
@@ -172,6 +186,9 @@ function assetKindForGroup(assetGroup: string): string {
   if (assetGroup === 'uploads') {
     return 'RENDER';
   }
+  if (assetGroup === 'entity-models') {
+    return 'ENTITY_MODEL_3D';
+  }
   return assetGroup.replace(/s$/, '').toUpperCase();
 }
 
@@ -232,12 +249,15 @@ function renderPrefixTemplate(template: string, projectId: string): string {
 
 function detectExtension(filenameHint?: string, contentType?: string): string {
   const hinted = String(filenameHint || '').trim().toLowerCase();
-  const matched = /\.(png|jpg|jpeg|webp)$/i.exec(hinted);
+  const matched = /\.(png|jpg|jpeg|webp|glb|gltf)$/i.exec(hinted);
   if (matched?.[1]) {
     return matched[1] === 'jpeg' ? 'jpg' : matched[1];
   }
 
   const normalizedType = String(contentType || '').toLowerCase();
+  if (normalizedType.includes('gltf-binary')) {
+    return 'glb';
+  }
   if (normalizedType.includes('png')) {
     return 'png';
   }
@@ -252,6 +272,12 @@ function detectExtension(filenameHint?: string, contentType?: string): string {
 
 function guessContentTypeFromFilename(filename: string): string {
   const normalized = filename.toLowerCase();
+  if (normalized.endsWith('.glb')) {
+    return 'model/gltf-binary';
+  }
+  if (normalized.endsWith('.gltf')) {
+    return 'model/gltf+json';
+  }
   if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
     return 'image/jpeg';
   }
