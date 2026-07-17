@@ -39,8 +39,9 @@
     // 把 artifact 的 formatVersion / normalized 一起透传过来。
     "turnaround": {
       "assetUri": "assets://entity-images/entity_char_yan_model_v1_1536_1024.png",
-      "formatVersion": "v1",   // model_input_sheet 的格式版本;不传=老的 styled sheet
-      "normalized": true       // 上游三等分归一化是否成功;缺省/null 当 false
+      "formatVersion": "v1",           // model_input_sheet 的格式版本;不传=老的 styled sheet
+      "normalized": true,              // 上游三等分归一化是否成功;缺省/null 当 false
+      "views": ["front","left","back"] // 可选,交叉校验:与 formatVersion 的布局不符则拒切
     },
 
     // —— 或 模式 B:预切单视图(与 turnaround 二选一;两者都给以 views 优先)——
@@ -69,6 +70,7 @@
 | `turnaround.assetUri` | 二选一 | string | 模式 A:三视图整图 sheet 的 `assets://` URI,worker 内部切片 |
 | `turnaround.formatVersion` | 否 | string | storyboard-tool `model_input_sheet` 的格式版本(现只认 `v1` = 一行 front/left/back,**三类实体统一**)。**不传** = 老的 styled turnaround sheet(按 entityKind 切)。**未知版本直接拒绝**(400),绝不猜:将来 v2(如四视图)被当 v1 切会静默出错模型 |
 | `turnaround.normalized` | 否 | bool | 上游三等分归一化是否**真的成功**。`true` → 按精确 1/N 等分切;`false`/缺省/null → 上游回退了原图,改用空白投影测量。缺省当 `false`(来路不明不算保证) |
+| `turnaround.views` | 否 | string[] | **交叉校验**,不是指令。sheet 自报的左到右视图顺序,原样从 artifact 抄。worker 按 `formatVersion` 算出布局,与它**不符则拒切**(400)——这能 catch `formatVersion` 单独 catch 不到的一类失败:上游改了布局却没 bump 版本。**顺序也校验**(`front,back,left` ≠ `front,left,back`)。artifact 没有就别传,缺省跳过检查 |
 | `views.front.assetUri` | 二选一 | string | 模式 B:正面单视图 `assets://` URI(提供 views 时必需) |
 | `views.left/right/back.assetUri` | 否 | string | 其余单视图 `assets://` URI;越全,侧/背面结构越准 |
 | `target.entityKind` | 是 | enum | `character`(主)/ `prop` |
