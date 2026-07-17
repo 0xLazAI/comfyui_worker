@@ -1,9 +1,10 @@
 import sharp from 'sharp';
 import type { EntityKind, ViewSlot } from './threeViewPayload.js';
 import {
-  MODEL_SHEET_BACKGROUND,
-  resolveModelSheetLayout,
+  resolveModelSheetProfile,
+  type ModelSheetProfile,
   type SheetLayout,
+  type SliceResult,
 } from './modelSheetFormat.js';
 
 /**
@@ -31,7 +32,7 @@ export type { SheetLayout };
  *
  * Only for the old `asset_turnaround` path (project style sheets / manual uploads). The
  * modeling-input path keys its layout off `formatVersion` instead — see
- * `MODEL_SHEET_LAYOUT_BY_FORMAT_VERSION`. Keep the two tables physically separate: keying
+ * `MODEL_SHEET_PROFILES`. Keep the two tables physically separate: keying
  * a modeling sheet by kind is what silently sliced 3-view prop sheets into 2.
  */
 export const SHEET_LAYOUT: Record<EntityKind, SheetLayout> = {
@@ -57,12 +58,9 @@ export interface SliceOptions {
   equalCut?: boolean;
 }
 
-export interface SliceResult {
-  /** Per-slot PNG buffers, in the order given by the layout. */
-  views: Partial<Record<ViewSlot, Buffer>>;
-  /** True when segmentation used the whitespace projection; false when it fell back to equal division. */
-  segmented: boolean;
-}
+/** Defined in `modelSheetFormat.ts` (a profile's `slice` returns it); re-exported for
+ *  existing importers of this module. */
+export type { SliceResult };
 
 const DEFAULTS: Required<SliceOptions> = {
   // 205 separates ink from background on BOTH sheet flavours: white (255) and the modeling
@@ -227,28 +225,43 @@ async function padViewsToCommonCanvas(
 }
 
 /**
+ * The shared single-row slicer — the default strategy for any format that is "N views in one
+ * row". A profile only needs its own `slice` when the layout is structurally different.
+ */
+async function sliceSingleRowSheet(
+  sheet: Buffer,
+  profile: ModelSheetProfile,
+  normalized: boolean,
+): Promise<SliceResult> {
+  const { views, segmented } = await sliceSheetWithLayout(sheet, profile.layout, {
+    ...DEFAULTS,
+    background: profile.background,
+    inkThreshold: profile.inkThreshold,
+    equalCut: normalized,
+  });
+  return { views: await padViewsToCommonCanvas(views, profile.background), segmented };
+}
+
+/**
  * Slice a storyboard-tool `model_input_sheet` into per-view PNGs sized for Hunyuan3D-mv.
  *
- * Layout comes from `formatVersion` (NOT entity kind — see
- * `MODEL_SHEET_LAYOUT_BY_FORMAT_VERSION`); an unknown version throws.
- * `normalized` reports whether upstream's equal-thirds normalisation actually succeeded:
+ * Everything version-dependent comes from the format's profile (`MODEL_SHEET_PROFILES`), not
+ * from constants here: layout, background, ink threshold, and — for a structurally different
+ * format — the slicing strategy itself. An unknown version throws rather than being guessed
+ * at. Old versions keep working forever because their profile is never edited; see
+ * `modelSheetFormat.ts`.
+ *
+ * `normalized` reports whether upstream's equal-N normalisation actually succeeded:
  *   - true  → cut at exact equal divisions (upstream guarantees it; don't re-guess)
  *   - false → upstream fell back to the raw image, so measure with whitespace projection
- * All views are padded onto one shared square canvas (`padViewsToCommonCanvas`).
  */
 export async function sliceModelInputSheet(
   sheet: Buffer,
   input: { formatVersion: string; normalized: boolean },
-  options: SliceOptions = {},
 ): Promise<SliceResult> {
-  const layout = resolveModelSheetLayout(input.formatVersion);
-  const { views, segmented } = await sliceSheetWithLayout(sheet, layout, {
-    ...DEFAULTS,
-    background: MODEL_SHEET_BACKGROUND,
-    equalCut: input.normalized,
-    ...options,
-  });
-  return { views: await padViewsToCommonCanvas(views, MODEL_SHEET_BACKGROUND), segmented };
+  const profile = resolveModelSheetProfile(input.formatVersion);
+  const slice = profile.slice ?? sliceSingleRowSheet;
+  return await slice(sheet, profile, input.normalized);
 }
 
 interface Range {

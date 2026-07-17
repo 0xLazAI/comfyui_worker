@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import sharp from 'sharp';
 import { sliceModelInputSheet } from './turnaroundSlice.js';
-import { MODEL_SHEET_BACKGROUND, resolveModelSheetLayout } from './modelSheetFormat.js';
+import { MODEL_SHEET_PROFILES, resolveModelSheetProfile } from './modelSheetFormat.js';
+
+const V1_BACKGROUND = MODEL_SHEET_PROFILES.v1!.background;
 
 /**
  * Build a synthetic `model_input_sheet`: gray blocks on the spec's #E6E6E6 background
@@ -26,7 +28,7 @@ async function buildModelSheet(
     left: f.left,
     top: Math.floor((height - f.height) / 2),
   }));
-  return sharp({ create: { width, height, channels: 4, background: MODEL_SHEET_BACKGROUND } })
+  return sharp({ create: { width, height, channels: 4, background: V1_BACKGROUND } })
     .composite(overlays)
     .png()
     .toBuffer();
@@ -39,11 +41,11 @@ async function dims(buf: Buffer): Promise<{ width: number; height: number }> {
 
 describe('model_input_sheet format contract', () => {
   it('v1 is three views regardless of entity kind (prop is NOT two)', () => {
-    expect(resolveModelSheetLayout('v1')).toEqual({ count: 3, slots: ['front', 'left', 'back'] });
+    expect(resolveModelSheetProfile('v1').layout).toEqual({ count: 3, slots: ['front', 'left', 'back'] });
   });
 
   it('rejects an unknown formatVersion instead of falling back to v1', () => {
-    expect(() => resolveModelSheetLayout('v2')).toThrow(/unsupported .* formatVersion: v2/);
+    expect(() => resolveModelSheetProfile('v2')).toThrow(/unsupported .* formatVersion: v2/);
   });
 });
 
