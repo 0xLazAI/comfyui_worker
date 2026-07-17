@@ -1,6 +1,6 @@
 import { ValidationError } from '../infra/HttpError.js';
 import {
-  MODEL_SHEET_LAYOUT_BY_FORMAT_VERSION,
+  MODEL_SHEET_PROFILES,
   knownModelSheetFormatVersions,
 } from './modelSheetFormat.js';
 
@@ -102,7 +102,7 @@ function normalizeTurnaround(value: unknown): TurnaroundInput | null {
     return { assetUri, formatVersion: null, normalized: false };
   }
   const formatVersion = requireString(spec.formatVersion, 'payload.turnaround.formatVersion');
-  if (!(formatVersion in MODEL_SHEET_LAYOUT_BY_FORMAT_VERSION)) {
+  if (!(formatVersion in MODEL_SHEET_PROFILES)) {
     // Reject rather than guess: a future 4-view sheet cut as 3 views yields a silently wrong
     // model. Failing loudly is the whole point of the version field.
     throw new ValidationError(

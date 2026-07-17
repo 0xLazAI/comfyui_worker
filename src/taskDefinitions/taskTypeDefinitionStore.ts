@@ -285,6 +285,12 @@ export class TaskTypeDefinitionStore {
       taskType: THREE_VIEW_3D_TASK_TYPE,
       description: DEFAULT_THREE_VIEW_3D_TASK_DEFINITION_DESCRIPTION,
       definitionJson: defaultThreeView3dDefinitionJson(),
+      // Definitions live in the DB and are never refreshed in place — an existing enabled
+      // row wins over whatever this file says. `requiredFieldPaths` is the only upgrade
+      // path: name a field the old row lacks and startup publishes a new version carrying
+      // the whole definition above. Without this, adding the two fields here changes
+      // nothing in production and the allowlist keeps 400-ing them.
+      requiredFieldPaths: ['turnaround.formatVersion', 'turnaround.normalized'],
     });
   }
 
@@ -684,7 +690,9 @@ function defaultTrainStyleLoraDefinitionJson(): TaskDefinitionJson {
   });
 }
 
-function defaultThreeView3dDefinitionJson(): TaskDefinitionJson {
+/** Exported for the contract test that asserts this allowlist accepts everything
+ *  `hydrateThreeView3dPayload` consumes — the two must not drift apart. */
+export function defaultThreeView3dDefinitionJson(): TaskDefinitionJson {
   return normalizeTaskDefinitionJson({
     consumer_key: THREE_VIEW_3D_CONSUMER_KEY,
     payload: {
@@ -694,6 +702,18 @@ function defaultThreeView3dDefinitionJson(): TaskDefinitionJson {
           type: 'string',
           required: false,
           description: '模式A：三视图整图 sheet 的 assets:// URI，worker 内部切片。与 views 二选一。',
+        },
+        'turnaround.formatVersion': {
+          type: 'string',
+          required: false,
+          description:
+            'storyboard-tool model_input_sheet 的格式版本（现只认 v1 = 一行 front/left/back，三类实体统一）。不传=老的 styled turnaround sheet，按 entityKind 切。未知版本直接拒绝，绝不猜。',
+        },
+        'turnaround.normalized': {
+          type: 'boolean',
+          required: false,
+          description:
+            '上游三等分归一化是否真的成功。true → 按精确 1/N 等分切；false/缺省 → 上游回退了原图，改用空白投影测量。缺省当 false（来路不明不算保证）。',
         },
         'views.front.assetUri': {
           type: 'string',
