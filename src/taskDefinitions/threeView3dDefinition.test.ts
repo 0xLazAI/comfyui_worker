@@ -77,3 +77,59 @@ describe('hunyuan3d_three_view definition ↔ payload contract', () => {
     expect(definition.payload.allow_unknown_fields).toBe(false);
   });
 });
+
+describe('the contract does not assert turnaround’s internal shape', () => {
+  it('passes a field storyboard-tool has not invented yet, with no contract change', () => {
+    // The promise this design makes: upstream adds a field under `turnaround` (say a future
+    // formatVersion carries extra metadata) and this worker needs NO edit here — no code, no
+    // requiredFieldPaths, no deploy. Enumerating leaves is what made #10 ship dead: every
+    // added field needed a three-step ritual, and missing one is a silent production 400.
+    const normalized = normalizePayloadWithDefinition(
+      {
+        turnaround: {
+          assetUri: 'assets://x/s.png',
+          formatVersion: 'v1',
+          normalized: true,
+          somethingUpstreamAddsLater: { nested: 'value' },
+        },
+        target,
+      },
+      definition,
+    );
+    // Survives the gate AND reaches the worker intact — an allowlist that dropped unknown
+    // sub-fields would be just as broken as one that rejected them.
+    expect(normalized.turnaround).toEqual({
+      assetUri: 'assets://x/s.png',
+      formatVersion: 'v1',
+      normalized: true,
+      somethingUpstreamAddsLater: { nested: 'value' },
+    });
+  });
+
+  it('still rejects an unknown TOP-LEVEL field — the umbrella opens one node, not the payload', () => {
+    // `allow_unknown_fields: false` still means something: only `turnaround`'s interior is
+    // open, because that interior is a contract owned upstream. A typo'd top-level key is
+    // still a caller error worth catching.
+    expect(() =>
+      normalizePayloadWithDefinition({ turnround: { assetUri: 'assets://x/s.png' }, target }, definition),
+    ).toThrow(/unsupported fields: turnround/);
+  });
+
+  it('validates that turnaround IS an object — open shape, still typed', () => {
+    expect(() =>
+      normalizePayloadWithDefinition({ turnaround: 'assets://x/s.png', target }, definition),
+    ).toThrow(/turnaround/);
+  });
+
+  it('publishes the known leaves as schema, so the agent form still renders them', () => {
+    // The leaves are documentation, not validation (the umbrella already passes everything).
+    // WorkerRegistryPublisher turns `fields` into the worker's payloadSchema, which the
+    // platform + the agent's run_worker_task_form widget render from. Collapsing turnaround
+    // to a bare opaque object would have cost that, so both live side by side:
+    // **validation is the worker's job, documentation is the contract's**.
+    const fields = Object.keys(definition.payload.fields);
+    expect(fields).toContain('turnaround');
+    expect(fields).toContain('turnaround.assetUri');
+    expect(definition.payload.fields['turnaround']?.type).toBe('object');
+  });
+});

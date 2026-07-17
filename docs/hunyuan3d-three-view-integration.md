@@ -209,6 +209,24 @@ export const MODEL_SHEET_PROFILES: Record<string, ModelSheetProfile> = {
 | 只是 sheet 像素尺寸变了 | **什么都不用做**(切图读真实尺寸、按比例切),而且这种改动本就不该 bump |
 | 布局**结构性**变了(如 2×2 网格) | 给 v2 的 profile 加一个 `slice` 函数;v1 继续走共享的单行切法,一行不动 |
 
+### 不用改的东西:task 定义(契约)
+
+`hunyuan3d_three_view` 的 task 定义(存 DB 的 `task_type_definitions.definition_json`)里,
+`turnaround` 是**伞节点**(`type: 'object'`)——`isAllowedPath` 放行「已声明路径的任何后代」,
+所以 `turnaround.*` 下的**任何**字段都自动过闸。
+
+→ **新 `formatVersion` 带来的新字段,不用登记进契约,直接就能传。**
+
+这是有意的分工:
+
+- **校验归 worker**(`hydrateThreeView3dPayload` + profile 注册表)——它才认识版本、认识 `assets://`、
+  知道哪个 `formatVersion` 能切。
+- **文档归契约**——契约里那些叶子(`turnaround.assetUri` 等)只用于 `WorkerRegistryPublisher`
+  发布 `payloadSchema` 给平台 / agent 表单渲染。**想让新字段出现在表单里就补一行,不补也照样工作。**
+
+别再回去枚举叶子做校验:契约存 DB、且 `ensureBuiltInDefinition` 不原地刷新,每加一个字段就是
+「改代码 + 加 requiredFieldPaths + 部署」三连,漏一步就是线上静默 400 —— #10 就是这么死的。
+
 ### 三条硬规矩
 
 1. **绝不修改已有版本的条目。** `modelSheetFormat.test.ts` 冻结了 v1 —— 你加 v2 时它红了,

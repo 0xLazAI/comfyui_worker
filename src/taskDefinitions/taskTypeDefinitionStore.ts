@@ -288,9 +288,13 @@ export class TaskTypeDefinitionStore {
       // Definitions live in the DB and are never refreshed in place — an existing enabled
       // row wins over whatever this file says. `requiredFieldPaths` is the only upgrade
       // path: name a field the old row lacks and startup publishes a new version carrying
-      // the whole definition above. Without this, adding the two fields here changes
-      // nothing in production and the allowlist keeps 400-ing them.
-      requiredFieldPaths: ['turnaround.formatVersion', 'turnaround.normalized'],
+      // the whole definition above.
+      //
+      // Naming the `turnaround` umbrella (not the leaves under it) is the point: once a row
+      // carries the umbrella, every future field storyboard-tool adds under `turnaround`
+      // passes without another entry here. This should be the LAST time this list needs
+      // touching for a payload-shape change.
+      requiredFieldPaths: ['turnaround'],
     });
   }
 
@@ -698,6 +702,25 @@ export function defaultThreeView3dDefinitionJson(): TaskDefinitionJson {
     payload: {
       allow_unknown_fields: false,
       fields: {
+        // ── 伞节点：turnaround 的**内部形状不由契约主张** ──────────────────────────
+        // isAllowedPath 放行「已声明路径的任何后代」，所以声明了 turnaround 这个 object，
+        // turnaround.* 下的任何字段都自动过闸 —— 上游 storyboard-tool 往 model_input_sheet
+        // artifact 上加字段（新的 formatVersion 带来的元数据等）时，**这里不用改**。
+        //
+        // 为什么不靠枚举：契约存在 DB 里、且 ensureBuiltInDefinition 不原地刷新，所以每加一个
+        // 字段都要「改代码 + 加 requiredFieldPaths + 部署」三连，漏一步就是线上 400（#10 就是
+        // 这么死的）。而字段合法性本来就是 hydrateThreeView3dPayload 的职责（它认版本、校验
+        // assets:// 前缀、拒未知 formatVersion）——契约再枚举一遍就是第二份真值，只会漂移。
+        //
+        // 下面的叶子**仍然保留**：它们不是校验用的（伞节点已放行一切），而是
+        // WorkerRegistryPublisher 把 fields 发布成 payloadSchema 给平台/agent 表单渲染的文档。
+        // 即：**校验归 worker，文档归契约**。新字段无需登记即可工作，想让它出现在表单里再补一行。
+        turnaround: {
+          type: 'object',
+          required: false,
+          description:
+            '模式A：三视图整图 sheet。与 views 二选一。内部字段由 worker 校验（assetUri 必填；model_input_sheet 另带 formatVersion/normalized）。',
+        },
         'turnaround.assetUri': {
           type: 'string',
           required: false,
