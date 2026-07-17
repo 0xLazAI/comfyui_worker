@@ -39,8 +39,9 @@
     // 把 artifact 的 formatVersion / normalized 一起透传过来。
     "turnaround": {
       "assetUri": "assets://entity-images/entity_char_yan_model_v1_1536_1024.png",
-      "formatVersion": "v1",   // model_input_sheet 的格式版本;不传=老的 styled sheet
-      "normalized": true       // 上游三等分归一化是否成功;缺省/null 当 false
+      "formatVersion": "v1",           // model_input_sheet 的格式版本;不传=老的 styled sheet
+      "normalized": true,              // 上游三等分归一化是否成功;缺省/null 当 false
+      "views": ["front","left","back"] // 可选,交叉校验:与 formatVersion 的布局不符则拒切
     },
 
     // —— 或 模式 B:预切单视图(与 turnaround 二选一;两者都给以 views 优先)——
@@ -69,6 +70,7 @@
 | `turnaround.assetUri` | 二选一 | string | 模式 A:三视图整图 sheet 的 `assets://` URI,worker 内部切片 |
 | `turnaround.formatVersion` | 否 | string | storyboard-tool `model_input_sheet` 的格式版本(现只认 `v1` = 一行 front/left/back,**三类实体统一**)。**不传** = 老的 styled turnaround sheet(按 entityKind 切)。**未知版本直接拒绝**(400),绝不猜:将来 v2(如四视图)被当 v1 切会静默出错模型 |
 | `turnaround.normalized` | 否 | bool | 上游三等分归一化是否**真的成功**。`true` → 按精确 1/N 等分切;`false`/缺省/null → 上游回退了原图,改用空白投影测量。缺省当 `false`(来路不明不算保证) |
+| `turnaround.views` | 否 | string[] | **交叉校验**,不是指令。sheet 自报的左到右视图顺序,原样从 artifact 抄。worker 按 `formatVersion` 算出布局,与它**不符则拒切**(400)——这能 catch `formatVersion` 单独 catch 不到的一类失败:上游改了布局却没 bump 版本。**顺序也校验**(`front,back,left` ≠ `front,left,back`)。artifact 没有就别传,缺省跳过检查 |
 | `views.front.assetUri` | 二选一 | string | 模式 B:正面单视图 `assets://` URI(提供 views 时必需) |
 | `views.left/right/back.assetUri` | 否 | string | 其余单视图 `assets://` URI;越全,侧/背面结构越准 |
 | `target.entityKind` | 是 | enum | `character`(主)/ `prop` |
@@ -208,6 +210,24 @@ export const MODEL_SHEET_PROFILES: Record<string, ModelSheetProfile> = {
 | 背景色 | `background` **和** `inkThreshold` —— **这俩是一个决定**,trim 的容差是它们的差值,单独调一个就是当初 trim 静默失效的原因 |
 | 只是 sheet 像素尺寸变了 | **什么都不用做**(切图读真实尺寸、按比例切),而且这种改动本就不该 bump |
 | 布局**结构性**变了(如 2×2 网格) | 给 v2 的 profile 加一个 `slice` 函数;v1 继续走共享的单行切法,一行不动 |
+
+### 不用改的东西:task 定义(契约)
+
+`hunyuan3d_three_view` 的 task 定义(存 DB 的 `task_type_definitions.definition_json`)里,
+`turnaround` 是**伞节点**(`type: 'object'`)——`isAllowedPath` 放行「已声明路径的任何后代」,
+所以 `turnaround.*` 下的**任何**字段都自动过闸。
+
+→ **新 `formatVersion` 带来的新字段,不用登记进契约,直接就能传。**
+
+这是有意的分工:
+
+- **校验归 worker**(`hydrateThreeView3dPayload` + profile 注册表)——它才认识版本、认识 `assets://`、
+  知道哪个 `formatVersion` 能切。
+- **文档归契约**——契约里那些叶子(`turnaround.assetUri` 等)只用于 `WorkerRegistryPublisher`
+  发布 `payloadSchema` 给平台 / agent 表单渲染。**想让新字段出现在表单里就补一行,不补也照样工作。**
+
+别再回去枚举叶子做校验:契约存 DB、且 `ensureBuiltInDefinition` 不原地刷新,每加一个字段就是
+「改代码 + 加 requiredFieldPaths + 部署」三连,漏一步就是线上静默 400 —— #10 就是这么死的。
 
 ### 三条硬规矩
 

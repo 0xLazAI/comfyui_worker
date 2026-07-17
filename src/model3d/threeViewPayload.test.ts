@@ -46,6 +46,48 @@ describe('hydrateThreeView3dPayload', () => {
     ).toThrow(/formatVersion v2 is not supported/);
   });
 
+  describe('views cross-check', () => {
+    const withViews = (views: unknown) => () =>
+      hydrateThreeView3dPayload(
+        { turnaround: { assetUri: 'assets://x/s.png', formatVersion: 'v1', views }, target },
+        ctx,
+      );
+
+    it('accepts views that match what this worker means by the version', () => {
+      expect(withViews(['front', 'left', 'back'])).not.toThrow();
+    });
+
+    it('catches upstream changing the layout WITHOUT bumping the version', () => {
+      // The one failure `formatVersion` alone cannot catch: the version is a promise, `views`
+      // is the sheet saying what it actually is. Disagreement means the sheet is not what we
+      // think it is — slicing it anyway maps views onto the wrong slots and yields a
+      // plausible-looking mesh built from a back view labelled "left".
+      expect(withViews(['front', 'left', 'back', 'right'])).toThrow(/does not match/);
+    });
+
+    it('rejects a reordered layout — order IS the layout, not just membership', () => {
+      // Same set, different left-to-right order = a different sheet. A set-only check would
+      // pass this and silently slice back-as-left.
+      expect(withViews(['front', 'back', 'left'])).toThrow(/does not match/);
+    });
+
+    it('names both sides so the mismatch is actionable', () => {
+      expect(withViews(['front', 'back', 'left'])).toThrow(/front, back, left/);
+      expect(withViews(['front', 'back', 'left'])).toThrow(/front, left, back/);
+    });
+
+    it('stays optional — an artifact without views still slices', () => {
+      // Older artifacts may predate the field; absence is not evidence of a mismatch.
+      expect(withViews(undefined)).not.toThrow();
+      expect(withViews(null)).not.toThrow();
+    });
+
+    it('rejects a malformed views value instead of ignoring it', () => {
+      expect(withViews('front,left,back')).toThrow(/must be an array of strings/);
+      expect(withViews([1, 2, 3])).toThrow(/must be an array of strings/);
+    });
+  });
+
   it('treats absent/null normalized as false (unknown provenance is not a guarantee)', () => {
     for (const spec of [
       { assetUri: 'assets://x/s.png', formatVersion: 'v1' },
