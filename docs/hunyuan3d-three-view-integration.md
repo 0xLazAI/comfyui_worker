@@ -172,3 +172,47 @@ curl "$WORKER/tasks/m3d-demo-1"     # status: running → succeeded
 ```
 
 相关代码:任务定义 `src/taskDefinitions/taskTypeDefinitionStore.ts`、handler `src/tasks/threeView3dTaskExecution.ts`、后端 client `src/model3d/hunyuan3dClient.ts`、台账写回 `src/model3d/entityLedger.ts`。
+
+---
+
+## 加一个 `formatVersion`(给未来的你)
+
+**当前只有 `v1`**(上游 storyboard-tool `MODEL_INPUT_FORMAT_VERSION = "v1"`,一行 front/left/back)。
+
+### 先理解一件事:版本不是迁移,是长期共存
+
+上游的 skip-existing 判断是**版本无关**的 —— 它只问「这个实体有没有 current 的 `model_input_sheet`」,
+不问是哪个版本。所以**一旦某实体有了 v1 图,上游 bump 到 v2 后也不会给它重出**(除非 `force`)。
+老图是不可变的 artifact take,还在项目里、还要能建模。
+
+→ **v1 和 v2 会在同一个项目里同时存在,长期如此。** 你不是在「升级到 v2」,你是在「新增支持 v2」。
+
+### 怎么加
+
+版本相关的一切都在 `src/model3d/modelSheetFormat.ts` 的 `MODEL_SHEET_PROFILES` 里,**只增不改**:
+
+```ts
+export const MODEL_SHEET_PROFILES: Record<string, ModelSheetProfile> = {
+  v1: { /* 不要动这一条 */ },
+  v2: {
+    layout: { count: 4, slots: ['front', 'left', 'back', 'right'] },
+    background: '#E6E6E6',
+    inkThreshold: 205,
+  },
+};
+```
+
+| v2 改了什么 | 你要做的 |
+|---|---|
+| 视图数 / 槽位顺序 | `layout` |
+| 背景色 | `background` **和** `inkThreshold` —— **这俩是一个决定**,trim 的容差是它们的差值,单独调一个就是当初 trim 静默失效的原因 |
+| 只是 sheet 像素尺寸变了 | **什么都不用做**(切图读真实尺寸、按比例切),而且这种改动本就不该 bump |
+| 布局**结构性**变了(如 2×2 网格) | 给 v2 的 profile 加一个 `slice` 函数;v1 继续走共享的单行切法,一行不动 |
+
+### 三条硬规矩
+
+1. **绝不修改已有版本的条目。** `modelSheetFormat.test.ts` 冻结了 v1 —— 你加 v2 时它红了,
+   说明你改错行了。已生成的 v1 图是不可变的,改 v1 的 profile = 悄悄把它们切成另一个(错的)模型。
+2. **未知版本直接拒绝,不要兜底成 v1 或「最新版」。** 猜一个没见过的格式 = 静默出烂模型,
+   任务失败远好过这个。能在这里失败,正是这个字段存在的全部意义。
+3. **`normalized` 语义自动泛化**,不用管:它用的是 `layout.count`,三视是 1/3、四视自然就是 1/4。
