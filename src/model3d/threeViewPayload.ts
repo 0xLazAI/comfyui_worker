@@ -110,9 +110,43 @@ function normalizeTurnaround(value: unknown): TurnaroundInput | null {
         `(known: ${knownModelSheetFormatVersions().join(', ')})`,
     );
   }
+  assertViewsMatchProfile(spec.views, formatVersion);
   // Upstream sets normalized:false when its equal-thirds normalisation fell back to the raw
   // image. Absent/null counts as false — an unknown provenance is not a guarantee.
   return { assetUri, formatVersion, normalized: spec.normalized === true };
+}
+
+/**
+ * Cross-check the artifact's own `views` against what this worker believes `formatVersion`
+ * means. Optional — absent skips the check (an older artifact may not carry it).
+ *
+ * This catches the one failure `formatVersion` alone cannot: upstream changing the sheet's
+ * layout **without bumping the version**. The version is a promise; `views` is the sheet
+ * saying what it actually is. When they disagree, the sheet is not what we think it is, and
+ * slicing it by our profile would map views onto the wrong slots — a plausible-looking mesh
+ * built from a back view labelled "left". Rejecting turns a silent corruption into a task
+ * failure that names the discipline slip.
+ *
+ * Order matters as much as membership: `views` is the left-to-right layout, so
+ * front/back/left is a different sheet from front/left/back even though the sets match.
+ */
+function assertViewsMatchProfile(value: unknown, formatVersion: string): void {
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+    throw new ValidationError('payload.turnaround.views must be an array of strings');
+  }
+  const expected = MODEL_SHEET_PROFILES[formatVersion]!.layout.slots;
+  const matches = value.length === expected.length && value.every((v, i) => v === expected[i]);
+  if (!matches) {
+    throw new ValidationError(
+      `payload.turnaround.views [${value.join(', ')}] does not match what this worker means by ` +
+        `formatVersion ${formatVersion} ([${expected.join(', ')}]). The sheet's layout and its ` +
+        `version disagree — upstream changed the layout without bumping the version, or the ` +
+        `wrong version was passed. Refusing to slice rather than map views onto wrong slots.`,
+    );
+  }
 }
 
 function normalizeViews(value: unknown): NormalizedThreeView3dPayload['views'] {
