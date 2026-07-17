@@ -1,5 +1,10 @@
 import sharp from 'sharp';
 import type { EntityKind, ViewSlot } from './threeViewPayload.js';
+import {
+  MODEL_SHEET_BACKGROUND,
+  resolveModelSheetLayout,
+  type SheetLayout,
+} from './modelSheetFormat.js';
 
 /**
  * Slice a turnaround reference *sheet* (one combined image with several views laid
@@ -18,18 +23,20 @@ import type { EntityKind, ViewSlot } from './threeViewPayload.js';
  *   prop      1024x1024 — one row of two views (not modeled; kept for completeness)
  */
 
-/** Row layout of a turnaround sheet: how many views and which PAILang slot each maps to. */
-export interface SheetLayout {
-  /** Number of views laid out left-to-right in the sheet. */
-  count: number;
-  /** PAILang view slot for each segment, in left-to-right order. */
-  slots: ViewSlot[];
-}
+/** Row layout of a sheet — defined in `modelSheetFormat.ts`, re-exported for existing importers. */
+export type { SheetLayout };
 
-/** front / side profile / back  →  PAILang front / left / back (side maps to left). */
+/**
+ * **Legacy styled-turnaround layout, keyed by entity kind.**
+ *
+ * Only for the old `asset_turnaround` path (project style sheets / manual uploads). The
+ * modeling-input path keys its layout off `formatVersion` instead — see
+ * `MODEL_SHEET_LAYOUT_BY_FORMAT_VERSION`. Keep the two tables physically separate: keying
+ * a modeling sheet by kind is what silently sliced 3-view prop sheets into 2.
+ */
 export const SHEET_LAYOUT: Record<EntityKind, SheetLayout> = {
   character: { count: 3, slots: ['front', 'left', 'back'] },
-  // prop is not modeled (only characters get 3D); defined so the table stays exhaustive.
+  // prop is not modeled on the legacy styled path (only characters got 3D there).
   prop: { count: 2, slots: ['front', 'left'] },
 };
 
@@ -40,6 +47,14 @@ export interface SliceOptions {
   contentColumnRatio?: number;
   /** Horizontal padding (px) kept around each segment before whitespace trim. Default 8. */
   segmentPadding?: number;
+  /** Sheet background colour, trimmed off each view. Default '#ffffff' (legacy styled sheets). */
+  background?: string;
+  /**
+   * Skip whitespace projection and cut at exact equal divisions. Set when upstream already
+   * guarantees the views sit in exact 1/N cells (`model_input_sheet` with `normalized:true`)
+   * — measuring is strictly worse than knowing.
+   */
+  equalCut?: boolean;
 }
 
 export interface SliceResult {
@@ -50,27 +65,42 @@ export interface SliceResult {
 }
 
 const DEFAULTS: Required<SliceOptions> = {
+  // 205 separates ink from background on BOTH sheet flavours: white (255) and the modeling
+  // sheet's #E6E6E6 (230) both read as background, while its gray mass #B8B8B8 (184) and
+  // line art (#1F1F1F/#4A4A4A) read as ink.
   inkThreshold: 205,
   contentColumnRatio: 0.02,
   segmentPadding: 8,
+  background: '#ffffff',
+  equalCut: false,
 };
 
 /**
- * Slice a turnaround sheet buffer into per-view PNG buffers for the given entity kind.
+ * Slice a **legacy styled** turnaround sheet into per-view PNG buffers, keyed by entity kind.
  * Returns a map keyed by PAILang view slot (front/left/back...). Always yields exactly
  * `layout.count` views; throws only on unreadable input.
+ *
+ * For storyboard-tool `model_input_sheet` artifacts use `sliceModelInputSheet` instead —
+ * that path keys its layout off `formatVersion` and normalises view sizes.
  */
 export async function sliceTurnaround(
   sheet: Buffer,
   entityKind: EntityKind,
   options: SliceOptions = {},
 ): Promise<SliceResult> {
-  const opts = { ...DEFAULTS, ...options };
   const layout = SHEET_LAYOUT[entityKind];
   if (!layout) {
     throw new Error(`no turnaround layout for entity kind: ${entityKind}`);
   }
+  return await sliceSheetWithLayout(sheet, layout, { ...DEFAULTS, ...options });
+}
 
+/** Shared slicing core: segment the row into `layout.count` ranges, extract and trim each. */
+async function sliceSheetWithLayout(
+  sheet: Buffer,
+  layout: SheetLayout,
+  opts: Required<SliceOptions>,
+): Promise<SliceResult> {
   const image = sharp(sheet, { failOn: 'none' });
   const { data, info } = await image
     .clone()
@@ -82,8 +112,12 @@ export async function sliceTurnaround(
     throw new Error(`turnaround sheet has invalid dimensions ${width}x${height}`);
   }
 
-  const boundaries = computeSegmentBoundaries(data, width, height, channels, layout.count, opts);
-  const segmented = boundaries !== null;
+  // equalCut: upstream already placed each view in an exact 1/N cell → cut there and skip the
+  // projection guess entirely. Otherwise measure, and fall back to equal division.
+  const boundaries = opts.equalCut
+    ? null
+    : computeSegmentBoundaries(data, width, height, channels, layout.count, opts);
+  const segmented = opts.equalCut || boundaries !== null;
   const ranges = boundaries ?? equalRanges(width, layout.count);
 
   const views: Partial<Record<ViewSlot, Buffer>> = {};
@@ -97,23 +131,124 @@ export async function sliceTurnaround(
       .extract({ left, top: 0, width: widthPx, height })
       .png()
       .toBuffer();
-    views[slot] = await trimWhitespace(extracted, opts.inkThreshold);
+    views[slot] = await trimBackground(extracted, opts.background, opts.inkThreshold);
   }
 
   return { views, segmented };
 }
 
-/** Trim white margins off a single view. Falls back to the untrimmed buffer if the
- *  view is entirely background (sharp's trim throws rather than returning empty). */
-async function trimWhitespace(view: Buffer, inkThreshold: number): Promise<Buffer> {
+/** Luminance of a `#RRGGBB` background. Both sheet flavours are greyscale, so the channels
+ *  agree; averaging keeps it honest for anything slightly off-gray. */
+function luminanceOf(hex: string): number {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) {
+    return 255; // unknown format → assume white, matching the legacy default
+  }
+  const n = parseInt(m[1], 16);
+  return ((n >> 16) & 0xff) / 3 + ((n >> 8) & 0xff) / 3 + (n & 0xff) / 3;
+}
+
+/**
+ * Trim background margins off a single view.
+ *
+ * The threshold is how far a pixel may sit from `background` and still count as background,
+ * so it must be measured FROM THAT BACKGROUND — not from white. The old `255 - inkThreshold`
+ * hard-coded a white sheet: on the modeling sheet's #E6E6E6 (230) it yields 50, which exceeds
+ * the distance to the flat gray mass #B8B8B8 (|230-184| = 46) — the subject itself reads as
+ * background and trim silently no-ops, leaving the full cell. Deriving it from the actual
+ * background gives 230-205 = 25 here and the unchanged 255-205 = 50 for legacy white sheets.
+ *
+ * Falls back to the untrimmed buffer if the view is entirely background (sharp's trim throws
+ * rather than returning empty).
+ */
+async function trimBackground(view: Buffer, background: string, inkThreshold: number): Promise<Buffer> {
+  const threshold = Math.max(1, Math.round(luminanceOf(background) - inkThreshold));
   try {
     return await sharp(view, { failOn: 'none' })
-      .trim({ background: '#ffffff', threshold: 255 - inkThreshold })
+      .trim({ background, threshold })
       .png()
       .toBuffer();
   } catch {
     return view;
   }
+}
+
+/**
+ * Pad every view onto ONE shared square canvas so all views end up the same pixel size.
+ *
+ * Why this is load-bearing: downstream ComfyUI runs `ImageResize+ {518, 518, method:"pad"}`
+ * per view, whose scale factor is `518 / that view's own longest side`. Trimming each view
+ * to its own content bbox therefore gives each view a DIFFERENT scale factor, silently
+ * destroying the inter-view scale relationship the sheet was generated to preserve
+ * ("SAME scale, height and camera distance"). It only looks fine for tall subjects, where
+ * height dominates all three views and the factors coincide; a wide subject (front 900x400
+ * → x0.576, side 500x400 → x1.036) blows the side view up ~2x and the reconstruction warps.
+ *
+ * One shared square side (max over every view's width and height) → identical input sizes →
+ * one identical scale factor → relative scale preserved. Square because 518x518 is the
+ * target shape, so the downstream pad is a no-op and the subject fills the frame.
+ *
+ * Not solvable by "just don't trim": a 512x1024 cell holds a T-pose figure only ~512x512
+ * (arm span ≈ height, capped by the cell width), so padding the raw cell to 518 would leave
+ * the subject at ~259x259 — a quarter of the canvas.
+ */
+async function padViewsToCommonCanvas(
+  views: Partial<Record<ViewSlot, Buffer>>,
+  background: string,
+): Promise<Partial<Record<ViewSlot, Buffer>>> {
+  const entries = Object.entries(views) as Array<[ViewSlot, Buffer]>;
+  const measured = await Promise.all(
+    entries.map(async ([slot, buffer]) => {
+      const { width = 0, height = 0 } = await sharp(buffer).metadata();
+      return { slot, buffer, width, height };
+    }),
+  );
+  const side = Math.max(...measured.flatMap((m) => [m.width, m.height]));
+  if (!Number.isFinite(side) || side <= 0) {
+    return views; // unreadable metadata → leave as-is rather than destroy the output
+  }
+
+  const padded: Partial<Record<ViewSlot, Buffer>> = {};
+  for (const m of measured) {
+    padded[m.slot] = await sharp({
+      create: { width: side, height: side, channels: 3, background },
+    })
+      .composite([
+        {
+          input: m.buffer,
+          left: Math.max(0, Math.round((side - m.width) / 2)),
+          top: Math.max(0, Math.round((side - m.height) / 2)),
+        },
+      ])
+      .png()
+      .toBuffer();
+  }
+  return padded;
+}
+
+/**
+ * Slice a storyboard-tool `model_input_sheet` into per-view PNGs sized for Hunyuan3D-mv.
+ *
+ * Layout comes from `formatVersion` (NOT entity kind — see
+ * `MODEL_SHEET_LAYOUT_BY_FORMAT_VERSION`); an unknown version throws.
+ * `normalized` reports whether upstream's equal-thirds normalisation actually succeeded:
+ *   - true  → cut at exact equal divisions (upstream guarantees it; don't re-guess)
+ *   - false → upstream fell back to the raw image, so measure with whitespace projection
+ * All views are padded onto one shared square canvas (`padViewsToCommonCanvas`).
+ */
+export async function sliceModelInputSheet(
+  sheet: Buffer,
+  input: { formatVersion: string; normalized: boolean },
+  options: SliceOptions = {},
+): Promise<SliceResult> {
+  const layout = resolveModelSheetLayout(input.formatVersion);
+  const { views, segmented } = await sliceSheetWithLayout(sheet, layout, {
+    ...DEFAULTS,
+    background: MODEL_SHEET_BACKGROUND,
+    equalCut: input.normalized,
+    ...options,
+  });
+  return { views: await padViewsToCommonCanvas(views, MODEL_SHEET_BACKGROUND), segmented };
 }
 
 interface Range {

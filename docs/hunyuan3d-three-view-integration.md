@@ -9,7 +9,10 @@
 - `task_type`:`hunyuan3d_three_view`
 - 产物:`assets://entity-models/<date>-<rand>.glb`,写入目标实体 `model3d` 件槽 + append 一条 `asset_model3d` take(`current`)
 - 后端:PAILang studio `/api/modeling`(workflow `hunyuan3d_mv`)——worker 内部调用,调用方无需关心
-- 建模对象:当前主要用于 **character**(角色);prop/location 不建模
+- 建模对象:**character / prop**。走 `model_input_sheet`(`formatVersion=v1`)时两者布局一致
+  (一行 front/left/back)——布局由**格式版本**决定,与实体类型无关。
+  (老的 styled sheet 路径仍按 entityKind 切,character=三视 / prop=两视。)
+  location 暂不支持(`entityKind` 无此项;场景建模待定输入格式)
 
 ---
 
@@ -32,7 +35,13 @@
   "project_id": "demo-local",
   "payload": {
     // —— 模式 A:整图 sheet(worker 内部切片)——
-    "turnaround": { "assetUri": "assets://entity-images/char_yan_turnaround.png" },
+    // 推荐:storyboard-tool 的 model_input_sheet artifact(中性技术风、专供图生 3D),
+    // 把 artifact 的 formatVersion / normalized 一起透传过来。
+    "turnaround": {
+      "assetUri": "assets://entity-images/entity_char_yan_model_v1_1536_1024.png",
+      "formatVersion": "v1",   // model_input_sheet 的格式版本;不传=老的 styled sheet
+      "normalized": true       // 上游三等分归一化是否成功;缺省/null 当 false
+    },
 
     // —— 或 模式 B:预切单视图(与 turnaround 二选一;两者都给以 views 优先)——
     // "views": {
@@ -58,6 +67,8 @@
 | 字段 | 必需 | 类型 | 说明 |
 |---|---|---|---|
 | `turnaround.assetUri` | 二选一 | string | 模式 A:三视图整图 sheet 的 `assets://` URI,worker 内部切片 |
+| `turnaround.formatVersion` | 否 | string | storyboard-tool `model_input_sheet` 的格式版本(现只认 `v1` = 一行 front/left/back,**三类实体统一**)。**不传** = 老的 styled turnaround sheet(按 entityKind 切)。**未知版本直接拒绝**(400),绝不猜:将来 v2(如四视图)被当 v1 切会静默出错模型 |
+| `turnaround.normalized` | 否 | bool | 上游三等分归一化是否**真的成功**。`true` → 按精确 1/N 等分切;`false`/缺省/null → 上游回退了原图,改用空白投影测量。缺省当 `false`(来路不明不算保证) |
 | `views.front.assetUri` | 二选一 | string | 模式 B:正面单视图 `assets://` URI(提供 views 时必需) |
 | `views.left/right/back.assetUri` | 否 | string | 其余单视图 `assets://` URI;越全,侧/背面结构越准 |
 | `target.entityKind` | 是 | enum | `character`(主)/ `prop` |

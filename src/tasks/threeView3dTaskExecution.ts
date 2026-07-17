@@ -12,7 +12,7 @@ import {
   type ModelingStatusResult,
 } from '../model3d/hunyuan3dClient.js';
 import { registerEntityModel3d } from '../model3d/entityLedger.js';
-import { sliceTurnaround } from '../model3d/turnaroundSlice.js';
+import { sliceModelInputSheet, sliceTurnaround } from '../model3d/turnaroundSlice.js';
 import {
   attachHunyuan3dRuntimeState,
   getHunyuan3dRuntimeState,
@@ -194,7 +194,15 @@ async function resolveViewImages(
 ): Promise<Partial<Record<ViewSlot, ViewImage>>> {
   if (payload.turnaround) {
     const sheet = await downloadAsset(payload.projectId, payload.turnaround.assetUri);
-    const { views } = await sliceTurnaround(sheet.buffer, payload.target.entityKind);
+    // formatVersion present → storyboard-tool model_input_sheet: layout by format (not entity
+    // kind), and view sizes normalised so all three share one downstream scale factor.
+    // Absent → legacy styled turnaround sheet, sliced by entity kind.
+    const { views } = payload.turnaround.formatVersion
+      ? await sliceModelInputSheet(sheet.buffer, {
+          formatVersion: payload.turnaround.formatVersion,
+          normalized: payload.turnaround.normalized,
+        })
+      : await sliceTurnaround(sheet.buffer, payload.target.entityKind);
     const images: Partial<Record<ViewSlot, ViewImage>> = {};
     for (const [slot, buffer] of Object.entries(views) as Array<[ViewSlot, Buffer]>) {
       images[slot] = {

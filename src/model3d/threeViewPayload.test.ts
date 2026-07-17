@@ -10,8 +10,51 @@ describe('hydrateThreeView3dPayload', () => {
       { turnaround: { assetUri: 'assets://x/sheet.png' }, target },
       ctx,
     );
-    expect(p.turnaround).toEqual({ assetUri: 'assets://x/sheet.png' });
+    // No formatVersion → legacy styled sheet (sliced by entity kind), and an unknown
+    // provenance is never treated as normalised.
+    expect(p.turnaround).toEqual({
+      assetUri: 'assets://x/sheet.png',
+      formatVersion: null,
+      normalized: false,
+    });
     expect(p.views.front).toBeUndefined();
+  });
+
+  it('accepts a model_input_sheet: known formatVersion + normalized passthrough', () => {
+    const p = hydrateThreeView3dPayload(
+      {
+        turnaround: { assetUri: 'assets://x/sheet.png', formatVersion: 'v1', normalized: true },
+        target,
+      },
+      ctx,
+    );
+    expect(p.turnaround).toEqual({
+      assetUri: 'assets://x/sheet.png',
+      formatVersion: 'v1',
+      normalized: true,
+    });
+  });
+
+  it('rejects an unknown formatVersion rather than guessing at the layout', () => {
+    // A future 4-view v2 cut as 3 views would yield a silently wrong model — the whole
+    // point of the version field is to fail loudly here.
+    expect(() =>
+      hydrateThreeView3dPayload(
+        { turnaround: { assetUri: 'assets://x/sheet.png', formatVersion: 'v2' }, target },
+        ctx,
+      ),
+    ).toThrow(/formatVersion v2 is not supported/);
+  });
+
+  it('treats absent/null normalized as false (unknown provenance is not a guarantee)', () => {
+    for (const spec of [
+      { assetUri: 'assets://x/s.png', formatVersion: 'v1' },
+      { assetUri: 'assets://x/s.png', formatVersion: 'v1', normalized: null },
+      { assetUri: 'assets://x/s.png', formatVersion: 'v1', normalized: 'yes' },
+    ]) {
+      const p = hydrateThreeView3dPayload({ turnaround: spec, target }, ctx);
+      expect(p.turnaround?.normalized).toBe(false);
+    }
   });
 
   it('accepts Mode B: pre-sliced views, with no turnaround', () => {
