@@ -1,3 +1,4 @@
+import { logger } from '../infra/logger.js';
 import { paiPlatformClient } from '../platform/paiPlatformClient.js';
 import type { EntityKind } from './threeViewPayload.js';
 
@@ -129,6 +130,57 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
   }
 
   return { path: ledgerPath, pointer, entityIndex: index, versionId };
+}
+
+/**
+ * Read a PROP's intrinsic `physicalAttributes.bboxM` (meters) from its ledger,
+ * for the metric bake.
+ *
+ * **Prop-only by design.** A character's size authority is single-axis `heightM`
+ * (prop-3d-size proposal §4.5); PACE lets a character carry an optional `bboxM`,
+ * but a per-axis metric bake on a character would distort it worse than the
+ * height-normalized path — so characters always return null here, structurally,
+ * not by relying on their data happening to omit bboxM.
+ *
+ * Returns null when: the kind isn't a prop; the prop has no valid bboxM; or the
+ * ledger read FAILS. A read failure is logged (distinct from a genuine absence)
+ * so a silent "wanted metric → got normalized" downgrade stays diagnosable, but
+ * it never blocks modeling. Axis order is PACE std-2b `[width, depth, height]`
+ * (z=height), forwarded verbatim; correctness depends on the estimator writing
+ * that order (storyboard-tool#157 / proposal S2).
+ */
+export async function readEntityBboxM(input: {
+  projectId: string;
+  entityKind: EntityKind;
+  entityId: string;
+}): Promise<[number, number, number] | null> {
+  if (input.entityKind !== 'prop') return null;
+  const ledgerPath = ENTITY_FILE[input.entityKind];
+  if (!ledgerPath) return null;
+
+  let ledgerFile: { value: unknown };
+  try {
+    ledgerFile = await paiPlatformClient.readPaceFile(input.projectId, ledgerPath);
+  } catch (err) {
+    logger.warn(
+      'readEntityBboxM: ledger read failed, prop uses normalized GLB — project=%s entity=%s: %s',
+      input.projectId, input.entityId, err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  }
+
+  if (!Array.isArray(ledgerFile.value)) return null;
+  const entity = ledgerFile.value.find(
+    (e) => e && typeof e === 'object'
+      && String((e as Record<string, unknown>).id || '') === input.entityId,
+  ) as Record<string, unknown> | undefined;
+  const pa = entity?.physicalAttributes;
+  if (!pa || typeof pa !== 'object') return null;
+  const raw = (pa as Record<string, unknown>).bboxM;
+  if (!Array.isArray(raw) || raw.length !== 3) return null;
+  const dims = raw.map((n) => (typeof n === 'number' && Number.isFinite(n) ? n : NaN));
+  if (!dims.every((n) => n > 0)) return null;
+  return [dims[0], dims[1], dims[2]] as [number, number, number];
 }
 
 /** True if an artifact belongs to the model3d take group of the given entity. */

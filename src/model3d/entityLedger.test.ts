@@ -7,8 +7,9 @@ vi.mock('../platform/paiPlatformClient.js', () => ({
   },
 }));
 
+import { logger } from '../infra/logger.js';
 import { paiPlatformClient } from '../platform/paiPlatformClient.js';
-import { registerEntityModel3d } from './entityLedger.js';
+import { readEntityBboxM, registerEntityModel3d } from './entityLedger.js';
 
 const mockRead = paiPlatformClient.readPaceFile as unknown as ReturnType<typeof vi.fn>;
 const mockWrite = paiPlatformClient.writePaceFiles as unknown as ReturnType<typeof vi.fn>;
@@ -117,5 +118,71 @@ describe('registerEntityModel3d', () => {
         assetUri: 'assets://x.glb',
       }),
     ).rejects.toThrow(/char_missing not found/);
+  });
+});
+
+describe('readEntityBboxM', () => {
+  beforeEach(() => mockRead.mockReset());
+
+  it('returns the prop bboxM [w,d,h] verbatim, reading the ledger once', async () => {
+    mockRead.mockResolvedValue({
+      value: [{ id: 'prop_drum', physicalAttributes: { bboxM: [0.5, 0.5, 0.6] } }],
+    });
+    const bbox = await readEntityBboxM({
+      projectId: 'proj_1', entityKind: 'prop', entityId: 'prop_drum',
+    });
+    expect(bbox).toEqual([0.5, 0.5, 0.6]);
+    expect(mockRead).toHaveBeenCalledWith('proj_1', 'entities/props.json');
+    expect(mockRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('is prop-only: a CHARACTER with a bboxM still returns null (no ledger read)', async () => {
+    // §4.5 — character size authority is single-axis heightM; never per-axis
+    // bake a character even if its ledger carries an optional bboxM.
+    mockRead.mockResolvedValue({
+      value: [{ id: 'char_yan', physicalAttributes: { bboxM: [0.5, 0.3, 1.8], heightM: 1.8 } }],
+    });
+    const bbox = await readEntityBboxM({
+      projectId: 'proj_1', entityKind: 'character', entityId: 'char_yan',
+    });
+    expect(bbox).toBeNull();
+    expect(mockRead).not.toHaveBeenCalled();
+  });
+
+  it('returns null when the prop has no bboxM, or it is malformed / non-positive', async () => {
+    mockRead.mockResolvedValue({
+      value: [
+        { id: 'prop_none', physicalAttributes: { heightM: 1 } },       // no bboxM
+        { id: 'prop_a', physicalAttributes: { bboxM: [1, 2] } },       // wrong length
+        { id: 'prop_b', physicalAttributes: { bboxM: [1, 0, 2] } },    // non-positive
+        { id: 'prop_c', physicalAttributes: { bboxM: [1, 'x', 2] } },  // non-numeric
+      ],
+    });
+    for (const id of ['prop_missing', 'prop_none', 'prop_a', 'prop_b', 'prop_c']) {
+      expect(
+        await readEntityBboxM({ projectId: 'proj_1', entityKind: 'prop', entityId: id }),
+      ).toBeNull();
+    }
+  });
+
+  it('returns null and logs when the ledger read fails (distinct from absent)', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => logger);
+    // Inject the rejection via a PLAIN function (not the vi.fn) so vitest v4's
+    // mock error tracker — which flags any throw/rejection inside a vi.fn even
+    // when the caller catches it — stays out of the way; readEntityBboxM's
+    // try/catch handles the rejection.
+    const client = paiPlatformClient as { readPaceFile: unknown };
+    const original = client.readPaceFile;
+    client.readPaceFile = () => Promise.reject(new Error('boom 500'));
+    try {
+      const bbox = await readEntityBboxM({
+        projectId: 'proj_1', entityKind: 'prop', entityId: 'prop_x',
+      });
+      expect(bbox).toBeNull();
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      client.readPaceFile = original;
+      warn.mockRestore();
+    }
   });
 });

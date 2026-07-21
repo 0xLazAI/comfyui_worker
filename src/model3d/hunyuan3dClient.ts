@@ -48,6 +48,9 @@ export async function submitModelingJob(input: {
   preset: string;
   seed: number | null;
   maxFaces: number | null;
+  /** Prop's real `physicalAttributes.bboxM` = [width, depth, height] meters, or
+   *  null. When set, the studio bakes true metric scale into the GLB (S4). */
+  bboxM: [number, number, number] | null;
 }): Promise<ModelingSubmitResult> {
   const views: Record<string, { image_path: string }> = {};
   for (const [slot, imagePath] of Object.entries(input.viewPaths)) {
@@ -61,6 +64,9 @@ export async function submitModelingJob(input: {
   }
   if (input.maxFaces !== null) {
     params.max_faces = input.maxFaces;
+  }
+  if (input.bboxM !== null) {
+    params.bbox_m = input.bboxM;
   }
 
   const response = await fetch(buildUrl('/api/modeling'), {
