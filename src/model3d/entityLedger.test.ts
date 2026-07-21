@@ -8,7 +8,7 @@ vi.mock('../platform/paiPlatformClient.js', () => ({
 }));
 
 import { paiPlatformClient } from '../platform/paiPlatformClient.js';
-import { registerEntityModel3d } from './entityLedger.js';
+import { readEntityBboxM, registerEntityModel3d } from './entityLedger.js';
 
 const mockRead = paiPlatformClient.readPaceFile as unknown as ReturnType<typeof vi.fn>;
 const mockWrite = paiPlatformClient.writePaceFiles as unknown as ReturnType<typeof vi.fn>;
@@ -118,4 +118,50 @@ describe('registerEntityModel3d', () => {
       }),
     ).rejects.toThrow(/char_missing not found/);
   });
+});
+
+describe('readEntityBboxM', () => {
+  beforeEach(() => mockRead.mockReset());
+
+  it('returns the prop bboxM [w,d,h] verbatim, reading the ledger once', async () => {
+    mockRead.mockResolvedValue({
+      value: [{ id: 'prop_drum', physicalAttributes: { bboxM: [0.5, 0.5, 0.6] } }],
+    });
+    const bbox = await readEntityBboxM({
+      projectId: 'proj_1', entityKind: 'prop', entityId: 'prop_drum',
+    });
+    expect(bbox).toEqual([0.5, 0.5, 0.6]);
+    expect(mockRead).toHaveBeenCalledWith('proj_1', 'entities/props.json');
+    expect(mockRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns null when the entity has no bboxM (e.g. character heightM only)', async () => {
+    mockRead.mockResolvedValue({
+      value: [{ id: 'char_yan', physicalAttributes: { heightM: 1.8 } }],
+    });
+    const bbox = await readEntityBboxM({
+      projectId: 'proj_1', entityKind: 'character', entityId: 'char_yan',
+    });
+    expect(bbox).toBeNull();
+  });
+
+  it('returns null for missing entity, malformed bbox, or non-positive dims', async () => {
+    mockRead.mockResolvedValue({
+      value: [
+        { id: 'prop_a', physicalAttributes: { bboxM: [1, 2] } },       // wrong length
+        { id: 'prop_b', physicalAttributes: { bboxM: [1, 0, 2] } },    // non-positive
+        { id: 'prop_c', physicalAttributes: { bboxM: [1, 'x', 2] } },  // non-numeric
+      ],
+    });
+    for (const id of ['prop_missing', 'prop_a', 'prop_b', 'prop_c']) {
+      expect(
+        await readEntityBboxM({ projectId: 'proj_1', entityKind: 'prop', entityId: id }),
+      ).toBeNull();
+    }
+  });
+
+  // Resilience note: a ledger READ FAILURE resolves to null (defensive
+  // `.catch` in readEntityBboxM) so a missing/unreadable ledger never blocks
+  // modeling — verified at runtime; not unit-tested here because vitest v4's
+  // unhandled-error tracker flags any rejected promise returned by a mock.
 });

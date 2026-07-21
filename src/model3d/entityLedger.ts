@@ -131,6 +131,40 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
   return { path: ledgerPath, pointer, entityIndex: index, versionId };
 }
 
+/**
+ * Read an entity's intrinsic `physicalAttributes.bboxM` (meters) from its ledger.
+ *
+ * Returns null when the entity carries no bboxM (e.g. a character with only
+ * `heightM`, or a not-yet-estimated prop) or the ledger/entry is missing —
+ * callers treat null as "no metric bake", leaving the GLB normalized for previz
+ * to fit. Axis order is PACE std-2b `[width, depth, height]` (z=height) and is
+ * forwarded verbatim to the modeling task; its correctness depends on the
+ * estimator writing that order (storyboard-tool#157 / prop-3d-size proposal S2).
+ */
+export async function readEntityBboxM(input: {
+  projectId: string;
+  entityKind: EntityKind;
+  entityId: string;
+}): Promise<[number, number, number] | null> {
+  const ledgerPath = ENTITY_FILE[input.entityKind];
+  if (!ledgerPath) return null;
+  const ledgerFile = await paiPlatformClient
+    .readPaceFile(input.projectId, ledgerPath)
+    .catch(() => null);
+  if (!ledgerFile || !Array.isArray(ledgerFile.value)) return null;
+  const entity = ledgerFile.value.find(
+    (e) => e && typeof e === 'object'
+      && String((e as Record<string, unknown>).id || '') === input.entityId,
+  ) as Record<string, unknown> | undefined;
+  const pa = entity?.physicalAttributes;
+  if (!pa || typeof pa !== 'object') return null;
+  const raw = (pa as Record<string, unknown>).bboxM;
+  if (!Array.isArray(raw) || raw.length !== 3) return null;
+  const dims = raw.map((n) => (typeof n === 'number' && Number.isFinite(n) ? n : NaN));
+  if (!dims.every((n) => n > 0)) return null;
+  return [dims[0], dims[1], dims[2]] as [number, number, number];
+}
+
 /** True if an artifact belongs to the model3d take group of the given entity. */
 function inGroup(artifact: Record<string, unknown>, entityId: string): boolean {
   return !!artifact

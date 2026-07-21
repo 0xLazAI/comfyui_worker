@@ -11,7 +11,7 @@ import {
   uploadModelingView,
   type ModelingStatusResult,
 } from '../model3d/hunyuan3dClient.js';
-import { registerEntityModel3d } from '../model3d/entityLedger.js';
+import { readEntityBboxM, registerEntityModel3d } from '../model3d/entityLedger.js';
 import { sliceModelInputSheet, sliceTurnaround } from '../model3d/turnaroundSlice.js';
 import {
   attachHunyuan3dRuntimeState,
@@ -124,11 +124,20 @@ async function submitModelingTask(
     viewPaths[slot] = await uploadModelingView(slot, image.filename, image.buffer, image.contentType);
   }
 
+  // Forward the prop's real bboxM (meters) so the studio bakes true metric
+  // scale into the GLB (S4). Absent → null → GLB stays normalized, previz fits.
+  const bboxM = await readEntityBboxM({
+    projectId: payload.projectId,
+    entityKind: payload.target.entityKind,
+    entityId: payload.target.entityId,
+  });
+
   const submitted = await submitModelingJob({
     viewPaths,
     preset: payload.preset,
     seed: payload.seed,
     maxFaces: payload.maxFaces,
+    bboxM,
   });
   const submittedAt = utcNow();
   const runtime = mergeHunyuan3dRuntimeState(null, {
@@ -152,6 +161,7 @@ async function submitModelingTask(
       views: Object.keys(viewPaths),
       preset: payload.preset,
       target: payload.target,
+      bboxM,
     },
   });
 
