@@ -35,18 +35,21 @@ describe('hydrateThreeView3dPayload', () => {
     });
   });
 
-  it('parses an explicit bboxM [w,d,h] from the payload verbatim', () => {
+  it('parses an explicit bboxM [w,d,h] from target.bboxM verbatim', () => {
     const p = hydrateThreeView3dPayload(
-      { turnaround: { assetUri: 'assets://x/sheet.png' }, target, bboxM: [6, 6, 1] },
+      { turnaround: { assetUri: 'assets://x/sheet.png' }, target: { ...target, bboxM: [6, 6, 1] } },
       ctx,
     );
     expect(p.bboxM).toEqual([6, 6, 1]);
   });
 
   it('defaults bboxM to null when absent, malformed, or non-positive', () => {
-    const base = { turnaround: { assetUri: 'assets://x/sheet.png' }, target };
+    const sheet = { assetUri: 'assets://x/sheet.png' };
     for (const bboxM of [undefined, [6, 6], [6, 6, 1, 1], [6, 0, 1], [6, 'x', 1]]) {
-      const p = hydrateThreeView3dPayload({ ...base, ...(bboxM ? { bboxM } : {}) }, ctx);
+      const p = hydrateThreeView3dPayload(
+        { turnaround: sheet, target: { ...target, ...(bboxM ? { bboxM } : {}) } },
+        ctx,
+      );
       expect(p.bboxM).toBeNull();
     }
   });

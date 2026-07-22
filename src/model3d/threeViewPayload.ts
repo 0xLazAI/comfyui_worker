@@ -50,10 +50,11 @@ export interface NormalizedThreeView3dPayload {
   };
   /**
    * The prop's real `physicalAttributes.bboxM` = `[width, depth, height]` meters (PACE
-   * std-2b axis order), passed EXPLICITLY by the caller so the studio can bake true metric
-   * scale into the GLB. Null when the caller omits it — the task execution then falls back
-   * to reading the entity ledger, and if that too is absent the GLB stays normalized.
-   * Forwarded verbatim (no axis remap): its correctness is the caller's responsibility.
+   * std-2b axis order), passed EXPLICITLY by the caller (on the wire under `target.bboxM`)
+   * so the studio can bake true metric scale into the GLB. Null when the caller omits it —
+   * the task execution then falls back to reading the entity ledger, and if that too is
+   * absent the GLB stays normalized. Forwarded verbatim (no axis remap): its correctness is
+   * the caller's responsibility.
    */
   bboxM: [number, number, number] | null;
   preset: ModelingPreset;
@@ -78,7 +79,10 @@ export function hydrateThreeView3dPayload(
     );
   }
   const target = normalizeTarget(payload.target);
-  const bboxM = normalizeBboxM(payload.bboxM);
+  // bboxM rides under `target` (the task definition allows arbitrary `target.*`
+  // via its object umbrella; a bare top-level array field can't be declared).
+  const targetObj = (payload.target ?? {}) as Record<string, unknown>;
+  const bboxM = normalizeBboxM(targetObj.bboxM);
   const preset = normalizePreset(payload.preset);
   const seed = optionalInteger(payload.seed, 'payload.seed', 0);
   const maxFaces = optionalInteger(payload.maxFaces, 'payload.maxFaces', 1000);

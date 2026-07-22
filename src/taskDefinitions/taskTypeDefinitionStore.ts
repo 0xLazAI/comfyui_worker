@@ -292,9 +292,12 @@ export class TaskTypeDefinitionStore {
       //
       // Naming the `turnaround` umbrella (not the leaves under it) is the point: once a row
       // carries the umbrella, every future field storyboard-tool adds under `turnaround`
-      // passes without another entry here. This should be the LAST time this list needs
-      // touching for a payload-shape change.
-      requiredFieldPaths: ['turnaround'],
+      // passes without another entry here.
+      //
+      // `target` is the same idea for the OTHER umbrella: naming it republishes the row that
+      // predates it, so `target.bboxM` (the prop's intrinsic size, forwarded for the metric
+      // bake) — and any future `target.*` field — passes without further churn.
+      requiredFieldPaths: ['turnaround', 'target'],
     });
   }
 
@@ -757,6 +760,18 @@ export function defaultThreeView3dDefinitionJson(): TaskDefinitionJson {
           type: 'string',
           required: false,
           description: '背面视图图片的 assets:// URI（可选）。',
+        },
+        // ── 伞节点：target 的内部形状整体透传 ─────────────────────────────────────
+        // 声明为 object，使 target.* 下的任意字段（含 `target.bboxM` 这种数组值）整体过闸
+        // 并原样透传——契约的字段校验只支持标量叶子（object 走 requireObject，会拒数组），
+        // 数组值只能藏在 object 伞节点里整体透传（真正的值校验归 hydrateThreeView3dPayload）。
+        // 必须声明在下面 `target.*` 叶子**之前**：归一化按声明顺序执行，伞节点先落整块、叶子
+        // 再逐个精校（enum/required），顺序反了会用未校验的整块覆盖已校验的叶子。
+        target: {
+          type: 'object',
+          required: true,
+          description:
+            '目标实体（挂产物）+ 其固有尺寸。内部叶子见下（entityKind/entityId/depictionIndex 校验；bboxM 为道具固有尺寸[宽,深,高]米，由 worker 校验后透传给 studio 做米制烘焙）。',
         },
         'target.entityKind': {
           type: 'string',
