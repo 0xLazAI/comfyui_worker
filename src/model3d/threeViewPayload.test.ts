@@ -35,6 +35,22 @@ describe('hydrateThreeView3dPayload', () => {
     });
   });
 
+  it('parses an explicit bboxM [w,d,h] from the payload verbatim', () => {
+    const p = hydrateThreeView3dPayload(
+      { turnaround: { assetUri: 'assets://x/sheet.png' }, target, bboxM: [6, 6, 1] },
+      ctx,
+    );
+    expect(p.bboxM).toEqual([6, 6, 1]);
+  });
+
+  it('defaults bboxM to null when absent, malformed, or non-positive', () => {
+    const base = { turnaround: { assetUri: 'assets://x/sheet.png' }, target };
+    for (const bboxM of [undefined, [6, 6], [6, 6, 1, 1], [6, 0, 1], [6, 'x', 1]]) {
+      const p = hydrateThreeView3dPayload({ ...base, ...(bboxM ? { bboxM } : {}) }, ctx);
+      expect(p.bboxM).toBeNull();
+    }
+  });
+
   it('rejects an unknown formatVersion rather than guessing at the layout', () => {
     // A future 4-view v2 cut as 3 views would yield a silently wrong model — the whole
     // point of the version field is to fail loudly here.

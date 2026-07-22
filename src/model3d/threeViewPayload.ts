@@ -48,6 +48,14 @@ export interface NormalizedThreeView3dPayload {
     entityId: string;
     depictionIndex: number | null;
   };
+  /**
+   * The prop's real `physicalAttributes.bboxM` = `[width, depth, height]` meters (PACE
+   * std-2b axis order), passed EXPLICITLY by the caller so the studio can bake true metric
+   * scale into the GLB. Null when the caller omits it — the task execution then falls back
+   * to reading the entity ledger, and if that too is absent the GLB stays normalized.
+   * Forwarded verbatim (no axis remap): its correctness is the caller's responsibility.
+   */
+  bboxM: [number, number, number] | null;
   preset: ModelingPreset;
   seed: number | null;
   maxFaces: number | null;
@@ -70,6 +78,7 @@ export function hydrateThreeView3dPayload(
     );
   }
   const target = normalizeTarget(payload.target);
+  const bboxM = normalizeBboxM(payload.bboxM);
   const preset = normalizePreset(payload.preset);
   const seed = optionalInteger(payload.seed, 'payload.seed', 0);
   const maxFaces = optionalInteger(payload.maxFaces, 'payload.maxFaces', 1000);
@@ -80,10 +89,21 @@ export function hydrateThreeView3dPayload(
     turnaround: views.front ? null : turnaround,
     views,
     target,
+    bboxM,
     preset,
     seed,
     maxFaces,
   };
+}
+
+/** Parse an optional `bboxM` = `[width, depth, height]` meters. Absent/malformed/
+ *  non-positive → null (metric bake is opt-in; a bad value silently degrades to a
+ *  normalized GLB rather than failing the job). Never remapped — forwarded as given. */
+function normalizeBboxM(value: unknown): [number, number, number] | null {
+  if (!Array.isArray(value) || value.length !== 3) return null;
+  const dims = value.map((n) => (typeof n === 'number' && Number.isFinite(n) ? n : NaN));
+  if (!dims.every((n) => n > 0)) return null;
+  return [dims[0], dims[1], dims[2]] as [number, number, number];
 }
 
 function normalizeTurnaround(value: unknown): TurnaroundInput | null {

@@ -124,13 +124,21 @@ async function submitModelingTask(
     viewPaths[slot] = await uploadModelingView(slot, image.filename, image.buffer, image.contentType);
   }
 
-  // Forward the prop's real bboxM (meters) so the studio bakes true metric
-  // scale into the GLB (S4). Absent → null → GLB stays normalized, previz fits.
-  const bboxM = await readEntityBboxM({
-    projectId: payload.projectId,
-    entityKind: payload.target.entityKind,
-    entityId: payload.target.entityId,
-  });
+  // Forward the prop's real bboxM (meters) so the studio bakes true metric scale
+  // into the GLB (S4). Prop-only (a character's size authority is heightM, §4.5).
+  // PREFER the value the caller passed in the task payload — it's the explicit,
+  // frontend-controlled source, so the frontend can drive metric baking without
+  // waiting on the ledger/estimator; fall back to the entity ledger only when the
+  // payload omits it. Absent in both → null → GLB stays normalized, previz fits.
+  const bboxM =
+    payload.target.entityKind !== 'prop'
+      ? null
+      : (payload.bboxM ??
+        (await readEntityBboxM({
+          projectId: payload.projectId,
+          entityKind: payload.target.entityKind,
+          entityId: payload.target.entityId,
+        })));
 
   const submitted = await submitModelingJob({
     viewPaths,
