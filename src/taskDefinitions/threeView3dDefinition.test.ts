@@ -55,6 +55,18 @@ describe('hunyuan3d_three_view definition ↔ payload contract', () => {
     });
   });
 
+  it('accepts target.bboxM through BOTH gates (the metric-bake field that 400-ed in prod)', () => {
+    // The array rides under the `target` object umbrella: a bare top-level array field can't
+    // be declared (the allowlist has no array type; object-typed leaves reject arrays), so it
+    // must nest inside an object node that passes through whole. This is the regression guard
+    // for exactly the gap that shipped — hydrator read it, allowlist 400-ed it.
+    const p = throughBothGates({
+      turnaround: { assetUri: 'assets://x/sheet.png' },
+      target: { ...target, bboxM: [6, 6, 1] },
+    });
+    expect(p.bboxM).toEqual([6, 6, 1]);
+  });
+
   it('still accepts a legacy styled sheet with no version fields', () => {
     const p = throughBothGates({ turnaround: { assetUri: 'assets://x/styled.png' }, target });
     expect(p.turnaround?.formatVersion).toBeNull();
