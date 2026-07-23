@@ -8,7 +8,7 @@ export const THREE_VIEW_3D_TASK_TYPE = 'hunyuan3d_three_view';
 export const THREE_VIEW_3D_CONSUMER_KEY = 'hunyuan3d_three_view_consumer';
 
 export type ModelingPreset = 'fast' | 'standard';
-export type EntityKind = 'prop' | 'character';
+export type EntityKind = 'prop' | 'character' | 'location';
 
 const VIEW_SLOTS = ['front', 'left', 'right', 'back'] as const;
 export type ViewSlot = (typeof VIEW_SLOTS)[number];
@@ -197,8 +197,8 @@ function normalizeViews(value: unknown): NormalizedThreeView3dPayload['views'] {
 function normalizeTarget(value: unknown): NormalizedThreeView3dPayload['target'] {
   const target = requireObject(value, 'payload.target');
   const entityKind = requireString(target.entityKind, 'payload.target.entityKind');
-  if (entityKind !== 'prop' && entityKind !== 'character') {
-    throw new ValidationError('payload.target.entityKind must be one of: prop, character');
+  if (entityKind !== 'prop' && entityKind !== 'character' && entityKind !== 'location') {
+    throw new ValidationError('payload.target.entityKind must be one of: prop, character, location');
   }
   const entityId = requireString(target.entityId, 'payload.target.entityId');
   return {

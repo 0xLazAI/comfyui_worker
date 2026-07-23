@@ -35,6 +35,27 @@ describe('hydrateThreeView3dPayload', () => {
     });
   });
 
+  it('accepts entityKind location — scenes are modelable now', () => {
+    const p = hydrateThreeView3dPayload(
+      {
+        turnaround: { assetUri: 'assets://x/sheet.png', formatVersion: 'v1', normalized: true },
+        target: { entityKind: 'location', entityId: 'loc_alley', depictionIndex: null },
+      },
+      ctx,
+    );
+    expect(p.target.entityKind).toBe('location');
+    expect(p.target.entityId).toBe('loc_alley');
+  });
+
+  it('still rejects an unknown entityKind', () => {
+    expect(() =>
+      hydrateThreeView3dPayload(
+        { turnaround: { assetUri: 'assets://x/sheet.png' }, target: { ...target, entityKind: 'voice' } },
+        ctx,
+      ),
+    ).toThrow(/must be one of: prop, character, location/);
+  });
+
   it('parses an explicit bboxM [w,d,h] from target.bboxM verbatim', () => {
     const p = hydrateThreeView3dPayload(
       { turnaround: { assetUri: 'assets://x/sheet.png' }, target: { ...target, bboxM: [6, 6, 1] } },

@@ -66,6 +66,21 @@ describe('sliceTurnaround', () => {
     expect(sideW).toBeLessThan(frontW);
   });
 
+  it('slices a location sheet as 3 views, same layout as a character', async () => {
+    // A scene's legacy styled sheet, if it ever reaches this path, must cut into
+    // front/left/back like a character (the modeling path uses formatVersion instead).
+    const sheet = await buildSheet(1536, 1024, [
+      { left: 40, width: 360 },
+      { left: 620, width: 180 },
+      { left: 1050, width: 300 },
+    ]);
+
+    const result = await sliceTurnaround(sheet, 'location');
+
+    expect(result.segmented).toBe(true);
+    expect(Object.keys(result.views).sort()).toEqual(['back', 'front', 'left']);
+  });
+
   it('falls back to equal division when the sheet has no whitespace valleys', async () => {
     // One solid dark block spanning the whole width → no interior whitespace gaps.
     const sheet = await sharp({

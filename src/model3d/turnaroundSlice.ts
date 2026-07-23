@@ -39,6 +39,11 @@ export const SHEET_LAYOUT: Record<EntityKind, SheetLayout> = {
   character: { count: 3, slots: ['front', 'left', 'back'] },
   // prop is not modeled on the legacy styled path (only characters got 3D there).
   prop: { count: 2, slots: ['front', 'left'] },
+  // location 3D always arrives via the model_input_sheet path (formatVersion present →
+  // sliceModelInputSheet, kind-agnostic), so it never actually reaches this legacy table.
+  // Present only to satisfy the exhaustive Record<EntityKind, …>; mirror character's 3-view
+  // layout so a legacy styled location sheet, if one ever hit this path, cuts sanely.
+  location: { count: 3, slots: ['front', 'left', 'back'] },
 };
 
 export interface SliceOptions {

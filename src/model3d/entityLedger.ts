@@ -5,6 +5,7 @@ import type { EntityKind } from './threeViewPayload.js';
 const ENTITY_FILE: Record<EntityKind, string> = {
   character: 'entities/characters.json',
   prop: 'entities/props.json',
+  location: 'entities/locations.json',
 };
 
 /** Project-level manifest that holds asset artifact takes (artifacts[]). */
