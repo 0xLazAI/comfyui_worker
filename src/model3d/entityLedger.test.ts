@@ -107,6 +107,35 @@ describe('registerEntityModel3d', () => {
     expect(appendOp.value.supersedesId).toBeNull();
   });
 
+  it('writes a location model3d back to entities/locations.json', async () => {
+    mockRead.mockImplementation(async (_project: string, path: string) => {
+      if (path === 'manifest.json') return { value: { artifacts: [] } };
+      if (path === 'entities/locations.json') return { value: [{ id: 'loc_alley' }] };
+      throw new Error(`unexpected read: ${path}`);
+    });
+    mockWrite.mockResolvedValue({ validation: { ok: true, issues: [] } });
+
+    const result = await registerEntityModel3d({
+      projectId: 'proj_1',
+      entityKind: 'location',
+      entityId: 'loc_alley',
+      depictionIndex: null,
+      assetUri: 'assets://scene.glb',
+    });
+
+    expect(result.pointer).toBe('/0/model3d');
+    const [, batch] = mockWrite.mock.calls[0];
+    const ledgerPatch = batch.patches.find(
+      (p: { path: string }) => p.path === 'entities/locations.json',
+    );
+    expect(ledgerPatch).toBeDefined();
+    expect(ledgerPatch.operations[0].value).toMatchObject({
+      status: 'ready',
+      uri: 'assets://scene.glb',
+      group: 'asset_model3d:loc_alley',
+    });
+  });
+
   it('throws when the target entity is absent from the ledger', async () => {
     setup({ artifacts: [] }, [{ id: 'char_other' }]);
     await expect(

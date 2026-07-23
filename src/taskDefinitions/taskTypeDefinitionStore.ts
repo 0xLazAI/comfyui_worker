@@ -298,6 +298,13 @@ export class TaskTypeDefinitionStore {
       // predates it, so `target.bboxM` (the prop's intrinsic size, forwarded for the metric
       // bake) — and any future `target.*` field — passes without further churn.
       requiredFieldPaths: ['turnaround', 'target'],
+      // `requiredFieldEnums` is the enum-VALUE upgrade path. Widening an enum (adding
+      // `location` to `target.entityKind`) adds no new field, so `requiredFieldPaths` can't
+      // see it — the deployed row already carries `target.entityKind`, just with a narrower
+      // enum, and the submit-time validator (server) keeps rejecting the new value. Naming
+      // the required members here republishes the row when the live enum lacks any of them.
+      // Superset test: the live enum must CONTAIN these; extra live values are fine.
+      requiredFieldEnums: { 'target.entityKind': ['prop', 'character', 'location'] },
     });
   }
 
@@ -306,12 +313,22 @@ export class TaskTypeDefinitionStore {
     description: string;
     definitionJson: TaskDefinitionJson;
     requiredFieldPaths?: string[];
+    requiredFieldEnums?: Record<string, string[]>;
   }): Promise<void> {
     const existing = await this.getEnabledByWorkerAndTaskType(WORKER_NAME, input.taskType);
     if (existing) {
       const missingFields = (input.requiredFieldPaths || [])
         .filter((fieldPath) => !existing.definitionJson.payload.fields[fieldPath]);
-      if (missingFields.length) {
+      // A field that exists but whose enum has since widened also needs a republish. Compare
+      // the live row's enum against the required members; a missing member (or an absent enum
+      // where one is now required) forces the upgrade, same as a missing field.
+      const staleEnumFields = Object.entries(input.requiredFieldEnums || {})
+        .filter(([fieldPath, requiredValues]) => {
+          const liveEnum = existing.definitionJson.payload.fields[fieldPath]?.enum ?? [];
+          return requiredValues.some((value) => !liveEnum.includes(value));
+        })
+        .map(([fieldPath]) => fieldPath);
+      if (missingFields.length || staleEnumFields.length) {
         const definitions = await this.list({
           workerName: WORKER_NAME,
           taskType: input.taskType,
@@ -776,8 +793,8 @@ export function defaultThreeView3dDefinitionJson(): TaskDefinitionJson {
         'target.entityKind': {
           type: 'string',
           required: true,
-          enum: ['prop', 'character'],
-          description: '产物挂到哪类资产台账：prop 道具 / character 角色。',
+          enum: ['prop', 'character', 'location'],
+          description: '产物挂到哪类资产台账：prop 道具 / character 角色 / location 场景。',
         },
         'target.entityId': {
           type: 'string',
