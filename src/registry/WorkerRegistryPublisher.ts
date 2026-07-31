@@ -16,6 +16,7 @@ import {
   REPLACE_PROP_PANEL_TASK_TYPE,
 } from '../render/workflowCatalog.js';
 import { taskTypeDefinitionStore } from '../taskDefinitions/taskTypeDefinitionStore.js';
+import { excludeHiddenTaskTypes } from '../taskDefinitions/hiddenTaskTypes.js';
 import type { TaskDefinitionJson, TaskTypeDefinitionRecord } from '../taskDefinitions/types.js';
 import { atomicWriteJson, atomicWriteText, ensureDirectory } from '../infra/filesystem.js';
 import { paiPlatformClient } from '../platform/paiPlatformClient.js';
@@ -43,7 +44,7 @@ export class WorkerRegistryPublisher {
   }
 
   async publishStaticFiles(): Promise<void> {
-    const taskDefinitions = await taskTypeDefinitionStore.list({ enabled: true });
+    const taskDefinitions = await this.listDiscoverableTaskDefinitions();
     const grouped = groupTaskDefinitionsByWorker(taskDefinitions);
     if (PLATFORM_API_ENABLED) {
       for (const [workerName, definitions] of Object.entries(grouped)) {
@@ -71,7 +72,9 @@ export class WorkerRegistryPublisher {
     if (!normalizedWorkerName) {
       return;
     }
-    const taskDefinitions = await taskTypeDefinitionStore.listEnabledByWorkerName(normalizedWorkerName);
+    const taskDefinitions = excludeHiddenTaskTypes(
+      await taskTypeDefinitionStore.listEnabledByWorkerName(normalizedWorkerName),
+    );
     if (!taskDefinitions.length) {
       if (PLATFORM_API_ENABLED) {
         await this.publishStaticFilesForWorker(normalizedWorkerName, []);
@@ -105,7 +108,7 @@ export class WorkerRegistryPublisher {
 
   private async publishHeartbeatFiles(status: string, message: string): Promise<void> {
     const workerNames = PLATFORM_API_ENABLED
-      ? await taskTypeDefinitionStore.listEnabledWorkerNames()
+      ? await this.listDiscoverableWorkerNames()
       : await this.listRegistryWorkerNames();
     for (const workerName of workerNames) {
       await this.publishHeartbeatForWorker(workerName, status, message);
@@ -185,6 +188,21 @@ export class WorkerRegistryPublisher {
       '- 最终图片长期引用写回 `manifest.artifacts`，不再依赖旧的 storyboard sidecar',
       '',
     ].join('\n');
+  }
+
+  /** 对外声明能力的唯一入口：隐藏的 task_type 在这里就被摘掉，不会进 schema，也不会进心跳。 */
+  private async listDiscoverableTaskDefinitions(): Promise<TaskTypeDefinitionRecord[]> {
+    return excludeHiddenTaskTypes(await taskTypeDefinitionStore.list({ enabled: true }));
+  }
+
+  private async listDiscoverableWorkerNames(): Promise<string[]> {
+    const taskDefinitions = await this.listDiscoverableTaskDefinitions();
+    const workerNames = new Set(
+      taskDefinitions
+        .map((definition) => normalizeWorkerName(definition.workerName))
+        .filter(Boolean),
+    );
+    return [...workerNames].sort();
   }
 
   private async listRegistryWorkerNames(): Promise<string[]> {

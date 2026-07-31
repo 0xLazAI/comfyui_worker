@@ -9,6 +9,7 @@ import { UnauthorizedError, ValidationError, NotFoundError } from './infra/HttpE
 import { CONTRACT_VERSION, PLATFORM_API_ENABLED, WORKER_NODE_TYPE, WORKER_TOKEN, WORKER_VERSION } from './infra/constants.js';
 import { WorkerRegistryPublisher } from './registry/WorkerRegistryPublisher.js';
 import { normalizeTaskDefinitionJson } from './taskDefinitions/definitionSchema.js';
+import { excludeHiddenTaskTypeNames } from './taskDefinitions/hiddenTaskTypes.js';
 import { taskTypeDefinitionStore } from './taskDefinitions/taskTypeDefinitionStore.js';
 import { supportsConsumerKey } from './tasks/taskExecution.js';
 import { getTaskResponse, submitTask } from './tasks/taskService.js';
@@ -110,7 +111,7 @@ export function createApp(): express.Express {
   });
 
   app.get('/capabilities', async (req, res) => {
-    const supportedTasks = await taskTypeDefinitionStore.listEnabledTaskTypes();
+    const supportedTasks = excludeHiddenTaskTypeNames(await taskTypeDefinitionStore.listEnabledTaskTypes());
     res.json({
       node_type: WORKER_NODE_TYPE,
       version: WORKER_VERSION,
