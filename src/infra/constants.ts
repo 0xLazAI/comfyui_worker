@@ -54,6 +54,8 @@ export const WORKER_NAME = pick(process.env.PAI_WORKER_NAME, process.env.COMFYUI
 export const BASE_URL = pick(process.env.PAI_WORKER_BASE_URL, process.env.COMFYUI_WORKER_BASE_URL, process.env.DEMO_WORKER_BASE_URL, `http://127.0.0.1:${PORT}`);
 export const WORKER_TOKEN = pick(process.env.PAI_WORKER_TOKEN, process.env.COMFYUI_WORKER_TOKEN, process.env.DEMO_WORKER_TOKEN, 'demo-worker-token');
 export const WORKER_NODE_TYPE = pick(process.env.PAI_WORKER_NODE_TYPE, process.env.COMFYUI_WORKER_NODE_TYPE, 'comfyui');
+// 不用 pick()：这里必须区分「未配置」（用内置默认隐藏列表）和「显式配成空」（不隐藏任何任务）。
+export const HIDDEN_TASK_TYPES_RAW: string | undefined = process.env.PAI_WORKER_HIDDEN_TASK_TYPES;
 export const WORKER_VERSION = pick(process.env.PAI_WORKER_VERSION, process.env.COMFYUI_WORKER_VERSION, '1.0.0');
 export const CONTRACT_VERSION = pick(process.env.PAI_CONTRACT_VERSION, process.env.COMFYUI_WORKER_CONTRACT_VERSION, '2026-06-01');
 export const PROJECTS_ROOT = pick(

@@ -652,6 +652,20 @@ curl -X POST 'http://host/task-definitions' \
 
 另外，`GET /capabilities` 返回的 `supported_tasks` 是从数据库里启用中的定义动态生成的，不是硬编码列表。
 
+### 7. 隐藏已下线的 Task Type
+
+有些 `task_type` 在数据库里还留着历史定义，但代码里早就没有对应 consumer 了（当前是 `blender`、
+`blender_create_3d`、`blender_update_3d`、`blender_pace_3d`、`blender_pace_review`）。让它们继续出现在能力
+声明里会误导调度方，所以 `src/taskDefinitions/hiddenTaskTypes.ts` 维护了一份隐藏列表，作用于三处：
+
+- `GET /capabilities` 的 `supported_tasks` 不再列出
+- 注册到 Pai Platform 的 `schema.tasks` 与心跳 worker 列表里不再包含（某个 `worker_name` 只剩隐藏任务时，
+  它整个不再注册、不再心跳）
+- `POST /tasks` 提交这些 `task_type` 直接返回 `unsupported task_type`
+
+数据库里的定义行本身不动，`GET /task-definitions` 依旧看得到，方便排查和恢复。要改隐藏范围，用环境变量
+`PAI_WORKER_HIDDEN_TASK_TYPES`（逗号分隔）；显式设成空串表示不隐藏任何任务。
+
 ## PACE Outputs
 
 新 contract 下，worker 不再依赖 `storyboard/*.outputs.json`。

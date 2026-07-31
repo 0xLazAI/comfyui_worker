@@ -20,6 +20,7 @@ import {
   normalizePayloadWithDefinition,
 } from '../taskDefinitions/definitionSchema.js';
 import { taskTypeDefinitionStore } from '../taskDefinitions/taskTypeDefinitionStore.js';
+import { isHiddenTaskType } from '../taskDefinitions/hiddenTaskTypes.js';
 import { TASK_RUNTIME_META_KEY } from '../taskDefinitions/types.js';
 import { enqueueTaskRecord } from './taskScheduler.js';
 import { taskStore } from './taskStore.js';
@@ -45,7 +46,10 @@ export async function submitTask(input: SubmitTaskInput): Promise<{
     };
   }
 
-  const definition = await taskTypeDefinitionStore.getEnabledByTaskType(input.taskType);
+  // 隐藏的 task_type 既不出现在 /capabilities，也不接受提交——否则「声明没有能力却还能跑」更歧义。
+  const definition = isHiddenTaskType(input.taskType)
+    ? null
+    : await taskTypeDefinitionStore.getEnabledByTaskType(input.taskType);
   if (!definition) {
     throw new ValidationError(`unsupported task_type: ${input.taskType}`);
   }
