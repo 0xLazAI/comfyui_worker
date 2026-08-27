@@ -31,6 +31,8 @@ export interface RegisterModel3dInput {
   entityId: string;
   depictionIndex: number | null;
   assetUri: string;
+  /** SHA-256 of the exact GLB bytes uploaded to asset storage. */
+  contentHash: string;
   /** Human-readable producer tag, e.g. "pailang:hunyuan3d_mv". */
   backend?: string;
   /** Upstream modeling job id (for take lineage disambiguation / audit). */
@@ -54,6 +56,9 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
     throw new Error(`no asset ledger for entity kind: ${input.entityKind}`);
   }
   const now = input.now ?? new Date().toISOString();
+  if (!/^[0-9a-f]{64}$/.test(input.contentHash)) {
+    throw new Error('model3d contentHash must be a lowercase SHA-256 digest');
+  }
 
   // Resolve the entity's index in its ledger array.
   const ledgerFile = await paiPlatformClient.readPaceFile(input.projectId, ledgerPath);
@@ -85,10 +90,16 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
     uri: input.assetUri,
     ref: input.entityId,
     versionId,
+    contentHash: input.contentHash,
     current: true,
     supersedesId,
     createdAt: now,
     source: 'worker_generated',
+    // A completed model task is the worker's deterministic selection of its
+    // own output. Scene-spatial's formal artifact provenance requires this
+    // explicit authority rather than treating a current ready artifact as an
+    // implicit human choice.
+    selectionAuthority: 'automatic',
     status: 'ready',
     mediaType: MODEL3D_MEDIA_TYPE,
   };
@@ -118,6 +129,7 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
     source: 'generated',
     group: `${MODEL3D_KIND}:${input.entityId}`,
     versionId,
+    contentHash: input.contentHash,
   };
 
   const response = await paiPlatformClient.writePaceFiles(input.projectId, {

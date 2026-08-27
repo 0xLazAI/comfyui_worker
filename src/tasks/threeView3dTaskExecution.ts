@@ -24,6 +24,8 @@ import {
   type NormalizedThreeView3dPayload,
   type ViewSlot,
 } from '../model3d/threeViewPayload.js';
+import { logger } from '../infra/logger.js';
+import { PaiPlatformApiError, paiPlatformClient } from '../platform/paiPlatformClient.js';
 import type { QueueHandlerContext, QueueJobEnvelope } from '../queue/types.js';
 import { downloadAsset, uploadEntityModelAsset } from '../render/assetStore.js';
 import { TaskRejectedError } from '../render/errors.js';
@@ -41,6 +43,64 @@ interface ExecContext {
   attemptNo: number;
   startedAt: string;
   workerName: string;
+}
+
+type SupportAnchorInitialization =
+  | { status: 'initialized'; revision: string; changedPaths: string[] }
+  | { status: 'not_configured' }
+  | { status: 'pending'; code: string; message: string };
+
+/**
+ * Turn a newly registered model into an immediately selectable support asset.
+ *
+ * This deliberately runs after the GLB take has been atomically registered.
+ * If Platform-side measurement cannot complete, preserving that valid model is
+ * safer than failing/retrying the modeling task and appending duplicate takes.
+ * A stale revision is the expected concurrent-edit case, so it is retried once
+ * against a fresh project revision.
+ */
+export async function initializeGeneratedModelPlacement(input: {
+  projectId: string;
+  entityKind: 'character' | 'prop' | 'location';
+  entityId: string;
+  versionId: string;
+  contentHash: string;
+}): Promise<SupportAnchorInitialization> {
+  if (!paiPlatformClient.isEnabled()) return { status: 'not_configured' };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const expectedRevision = await paiPlatformClient.readPaceProjectRevision(input.projectId);
+      const result = await paiPlatformClient.measureEntityDimensions({
+        ...input,
+        expectedRevision,
+        initializeSupportAnchors: input.entityKind !== 'location',
+      });
+      return {
+        status: 'initialized',
+        revision: result.snapshotRevision,
+        changedPaths: result.changedPaths,
+      };
+    } catch (error) {
+      if (error instanceof PaiPlatformApiError && error.code === 'pace_object_revision_stale' && attempt === 0) {
+        continue;
+      }
+      const code = error instanceof PaiPlatformApiError ? error.code : 'support_anchor_initialization_failed';
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(
+        'model3d support-anchor initialization pending — project=%s entity=%s version=%s: %s',
+        input.projectId,
+        input.entityId,
+        input.versionId,
+        message,
+      );
+      return { status: 'pending', code, message };
+    }
+  }
+
+  // The loop always returns, retained to keep this branch explicit if it is
+  // changed in the future.
+  return { status: 'pending', code: 'support_anchor_initialization_failed', message: 'initialization did not complete' };
 }
 
 export async function handleThreeView3dExecute(
@@ -366,13 +426,27 @@ async function finalizeModelingTask(
     entityId: payload.target.entityId,
     depictionIndex: payload.target.depictionIndex,
     assetUri: uploaded.assetUri,
+    contentHash: uploaded.contentHash,
     backend: `pailang:${HUNYUAN3D_MODELING_WORKFLOW}`,
     jobId,
+  });
+
+  // Platform owns measured authored placement: it downloads the exact asset
+  // bytes, verifies this hash and persists bounds plus version-bound automatic
+  // support-anchor candidates atomically.  A failure here must not invalidate
+  // the already registered GLB; the operator can retry initialization later.
+  const placement = await initializeGeneratedModelPlacement({
+    projectId: payload.projectId,
+    entityKind: payload.target.entityKind,
+    entityId: payload.target.entityId,
+    versionId: ledger.versionId,
+    contentHash: uploaded.contentHash,
   });
 
   const result = {
     modelingJobId: jobId,
     model3dUri: uploaded.assetUri,
+    model3dContentHash: uploaded.contentHash,
     entityKind: payload.target.entityKind,
     entityId: payload.target.entityId,
     ledgerPath: ledger.path,
@@ -380,6 +454,7 @@ async function finalizeModelingTask(
     faces: status.faces,
     verts: status.verts,
     dimensions: status.dimensions,
+    supportAnchorInitialization: placement,
   };
 
   await taskStore.save({
@@ -403,7 +478,12 @@ async function finalizeModelingTask(
     attemptNo: context.attemptNo,
     workerName: context.workerName,
     message: 'hunyuan3d_three_view execution succeeded',
-    detailJson: { jobId, model3dUri: uploaded.assetUri, ledgerPointer: ledger.pointer },
+    detailJson: {
+      jobId,
+      model3dUri: uploaded.assetUri,
+      ledgerPointer: ledger.pointer,
+      supportAnchorInitialization: placement.status,
+    },
   });
   await taskStore.saveAttempt({
     taskId: record.taskId,

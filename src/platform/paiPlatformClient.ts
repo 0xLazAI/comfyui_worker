@@ -324,17 +324,61 @@ class PaiPlatformClient {
     return data.deletePaceFiles;
   }
 
+  async readPaceProjectRevision(projectId: string): Promise<string> {
+    const data = await this.requestGraphql<{ paceProjectRevision: string }>(`
+      query PaceProjectRevision($projectId: String!) {
+        paceProjectRevision(projectId: $projectId)
+      }
+    `, { projectId });
+    return data.paceProjectRevision;
+  }
+
+  async measureEntityDimensions(input: {
+    projectId: string;
+    entityKind: 'character' | 'prop' | 'location';
+    entityId: string;
+    expectedRevision: string;
+    versionId: string;
+    contentHash: string;
+    initializeSupportAnchors?: boolean;
+  }): Promise<{
+    snapshotRevision: string;
+    changedPaths: string[];
+    affectedShotIds: string[];
+    payload: Record<string, unknown>;
+  }> {
+    const data = await this.requestGraphql<{
+      measureEntityDimensions: {
+        snapshotRevision: string;
+        changedPaths: string[];
+        affectedShotIds: string[];
+        payload: Record<string, unknown>;
+      };
+    }>(`
+      mutation MeasureEntityDimensions($input: EntityDimensionMeasureInput!) {
+        measureEntityDimensions(input: $input) {
+          snapshotRevision
+          changedPaths
+          affectedShotIds
+          payload
+        }
+      }
+    `, { input });
+    return data.measureEntityDimensions;
+  }
+
   async createAssetUploadUrl(input: {
     projectId: string;
     assetKind: string;
     contentType: string;
+    contentHash?: string;
   }): Promise<AssetUploadUrlResponse> {
     try {
       const data = await this.requestGraphql<{
         createAssetUploadUrl: AssetUploadUrlResponse;
       }>(`
-        mutation CreateAssetUploadUrl($projectId: String!, $assetKind: AssetKind!, $contentType: String!) {
-          createAssetUploadUrl(projectId: $projectId, assetKind: $assetKind, contentType: $contentType) {
+        mutation CreateAssetUploadUrl($projectId: String!, $assetKind: AssetKind!, $contentType: String!, $contentHash: String) {
+          createAssetUploadUrl(projectId: $projectId, assetKind: $assetKind, contentType: $contentType, contentHash: $contentHash) {
             assetsUri
             uploadUrl
             headers
@@ -345,6 +389,7 @@ class PaiPlatformClient {
         projectId: input.projectId,
         assetKind: input.assetKind,
         contentType: input.contentType,
+        contentHash: input.contentHash,
       });
       return data.createAssetUploadUrl;
     } catch (error) {

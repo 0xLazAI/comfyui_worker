@@ -13,6 +13,7 @@ import { readEntityBboxM, registerEntityModel3d } from './entityLedger.js';
 
 const mockRead = paiPlatformClient.readPaceFile as unknown as ReturnType<typeof vi.fn>;
 const mockWrite = paiPlatformClient.writePaceFiles as unknown as ReturnType<typeof vi.fn>;
+const MODEL_HASH = 'a'.repeat(64);
 
 function setup(manifest: unknown, entities: unknown) {
   mockRead.mockImplementation(async (_project: string, path: string) => {
@@ -41,6 +42,7 @@ describe('registerEntityModel3d', () => {
       entityId: 'char_yan',
       depictionIndex: null,
       assetUri: 'assets://new.glb',
+      contentHash: MODEL_HASH,
       jobId: 'job_abcdef123',
     });
 
@@ -65,7 +67,9 @@ describe('registerEntityModel3d', () => {
       current: true,
       supersedesId: 'asset_take_1',
       versionId: 'asset_take_2_job_ab',
+      contentHash: MODEL_HASH,
       source: 'worker_generated',
+      selectionAuthority: 'automatic',
       status: 'ready',
       mediaType: 'model/gltf-binary',
     });
@@ -82,6 +86,7 @@ describe('registerEntityModel3d', () => {
           source: 'generated',
           group: 'asset_model3d:char_yan',
           versionId: 'asset_take_2_job_ab',
+          contentHash: MODEL_HASH,
         },
       },
     ]);
@@ -96,6 +101,7 @@ describe('registerEntityModel3d', () => {
       entityId: 'char_yan',
       depictionIndex: null,
       assetUri: 'assets://first.glb',
+      contentHash: MODEL_HASH,
     });
 
     expect(result.versionId).toBe('asset_take_1');
@@ -121,6 +127,7 @@ describe('registerEntityModel3d', () => {
       entityId: 'loc_alley',
       depictionIndex: null,
       assetUri: 'assets://scene.glb',
+      contentHash: MODEL_HASH,
     });
 
     expect(result.pointer).toBe('/0/model3d');
@@ -133,6 +140,7 @@ describe('registerEntityModel3d', () => {
       status: 'ready',
       uri: 'assets://scene.glb',
       group: 'asset_model3d:loc_alley',
+      contentHash: MODEL_HASH,
     });
   });
 
@@ -145,6 +153,7 @@ describe('registerEntityModel3d', () => {
         entityId: 'char_missing',
         depictionIndex: null,
         assetUri: 'assets://x.glb',
+        contentHash: MODEL_HASH,
       }),
     ).rejects.toThrow(/char_missing not found/);
   });

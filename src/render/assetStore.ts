@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
   PAI_ASSET_ACCESS_KEY_ID,
@@ -23,6 +23,8 @@ export interface UploadedAsset {
   filename: string;
   bytes: number;
   contentType: string;
+  /** SHA-256 of the exact uploaded bytes (the PACE artifact identity). */
+  contentHash: string;
 }
 
 let client: S3Client | null = null;
@@ -120,12 +122,17 @@ async function uploadAsset(
   const filename = `${utcDateStamp()}-${randomBytes(4).toString('base64url')}.${extension}`;
   const assetUri = `assets://${assetGroup}/${filename}`;
   const contentType = input.contentType || guessContentTypeFromFilename(filename);
+  // Calculate before asking Platform for the presigned URL. The same digest is
+  // then persisted in the model take, making the slot, artifact and uploaded
+  // GLB one exact identity rather than a legacy URI-only reference.
+  const contentHash = createHash('sha256').update(input.buffer).digest('hex');
 
   if (PLATFORM_API_ENABLED) {
     const upload = await paiPlatformClient.createAssetUploadUrl({
       projectId,
       assetKind: assetKindForGroup(assetGroup),
       contentType,
+      contentHash,
     });
     await uploadViaSignedUrl(upload.uploadUrl, {
       method: upload.method || 'PUT',
@@ -137,6 +144,7 @@ async function uploadAsset(
       filename: filenameFromUri(upload.assetsUri),
       bytes: input.buffer.byteLength,
       contentType,
+      contentHash,
     };
   }
 
@@ -154,6 +162,7 @@ async function uploadAsset(
     filename,
     bytes: input.buffer.byteLength,
     contentType,
+    contentHash,
   };
 }
 
