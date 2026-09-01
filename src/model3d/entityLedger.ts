@@ -130,12 +130,40 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
     group: `${MODEL3D_KIND}:${input.entityId}`,
     versionId,
     contentHash: input.contentHash,
+    format: 'glb',
+    filename: input.assetUri.split('/').pop() || `${input.entityId}.glb`,
   };
+
+  const entity = entities[index] as Record<string, unknown>;
+  const currentPreviz = entity.previzModel;
+  const ledgerOperations: Array<{ op: 'add'; path: string; value: unknown }> = [
+    { op: 'add', path: pointer, value: slot },
+  ];
+  if (
+    input.depictionIndex === null
+    && currentPreviz
+    && typeof currentPreviz === 'object'
+    && !Array.isArray(currentPreviz)
+    && (currentPreviz as Record<string, unknown>).source === 'model3d'
+  ) {
+    ledgerOperations.push({
+      op: 'add',
+      path: `/${index}/previzModel`,
+      value: {
+        source: 'model3d',
+        uri: input.assetUri,
+        format: 'glb',
+        filename: slot.filename,
+        selectedAt: now,
+        selectionAuthority: 'human',
+      },
+    });
+  }
 
   const response = await paiPlatformClient.writePaceFiles(input.projectId, {
     patches: [
       { path: PROJECT_MANIFEST, operations: manifestOps },
-      { path: ledgerPath, operations: [{ op: 'add', path: pointer, value: slot }] },
+      { path: ledgerPath, operations: ledgerOperations },
     ],
   });
   if (!response.validation.ok) {

@@ -87,8 +87,80 @@ describe('registerEntityModel3d', () => {
           group: 'asset_model3d:char_yan',
           versionId: 'asset_take_2_job_ab',
           contentHash: MODEL_HASH,
+          format: 'glb',
+          filename: 'new.glb',
         },
       },
+    ]);
+  });
+
+  it('updates previzModel when generated model3d is the selected source', async () => {
+    setup(
+      { artifacts: [] },
+      [
+        {
+          id: 'char_yan',
+          previzModel: {
+            source: 'model3d',
+            uri: 'assets://old.glb',
+            format: 'glb',
+            filename: 'old.glb',
+            selectedAt: '2026-08-01T00:00:00Z',
+            selectionAuthority: 'human',
+          },
+        },
+      ],
+    );
+
+    await registerEntityModel3d({
+      projectId: 'proj_1',
+      entityKind: 'character',
+      entityId: 'char_yan',
+      depictionIndex: null,
+      assetUri: 'assets://entity-models/new.glb',
+      contentHash: MODEL_HASH,
+      now: '2026-08-29T00:00:00Z',
+    });
+
+    const [, batch] = mockWrite.mock.calls[0];
+    const ledgerPatch = batch.patches.find(
+      (patch: { path: string }) => patch.path === 'entities/characters.json',
+    );
+    expect(ledgerPatch.operations).toContainEqual({
+      op: 'add',
+      path: '/0/previzModel',
+      value: {
+        source: 'model3d',
+        uri: 'assets://entity-models/new.glb',
+        format: 'glb',
+        filename: 'new.glb',
+        selectedAt: '2026-08-29T00:00:00Z',
+        selectionAuthority: 'human',
+      },
+    });
+  });
+
+  it('leaves a preset-selected previzModel unchanged', async () => {
+    setup(
+      { artifacts: [] },
+      [{ id: 'char_yan', previzModel: { source: 'presetModel' } }],
+    );
+
+    await registerEntityModel3d({
+      projectId: 'proj_1',
+      entityKind: 'character',
+      entityId: 'char_yan',
+      depictionIndex: null,
+      assetUri: 'assets://entity-models/new.glb',
+      contentHash: MODEL_HASH,
+    });
+
+    const [, batch] = mockWrite.mock.calls[0];
+    const ledgerPatch = batch.patches.find(
+      (patch: { path: string }) => patch.path === 'entities/characters.json',
+    );
+    expect(ledgerPatch.operations.map((operation: { path: string }) => operation.path)).toEqual([
+      '/0/model3d',
     ]);
   });
 
