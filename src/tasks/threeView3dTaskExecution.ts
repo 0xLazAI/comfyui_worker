@@ -452,6 +452,7 @@ async function finalizeModelingTask(
     assetUri: uploaded.assetUri,
     contentHash: uploaded.contentHash,
     physicalInputHash: payload.physicalInputHash,
+    protectGeneratedCurrent: payload.protectGeneratedCurrent,
     backend: `pailang:${HUNYUAN3D_MODELING_WORKFLOW}`,
     jobId,
   });

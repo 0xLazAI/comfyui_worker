@@ -35,6 +35,8 @@ export interface RegisterModel3dInput {
   contentHash: string;
   /** Frozen asset-physical-input-v1 digest consumed by this model. */
   physicalInputHash?: string | null;
+  /** bbox sync: publish only while the current model remains machine-owned. */
+  protectGeneratedCurrent?: boolean;
   /** Human-readable producer tag, e.g. "pailang:hunyuan3d_mv". */
   backend?: string;
   /** Upstream modeling job id (for take lineage disambiguation / audit). */
@@ -78,6 +80,9 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
   if (index < 0) {
     throw new Error(`entity ${input.entityId} not found in ${ledgerPath}`);
   }
+  const pointer = input.depictionIndex === null
+    ? `/${index}/model3d`
+    : `/${index}/depictions/${input.depictionIndex}/model3d`;
 
   // Read the project manifest's artifact list (may be missing on a fresh project).
   const manifestFile = await paiPlatformClient.readPaceFile(input.projectId, PROJECT_MANIFEST)
@@ -87,6 +92,31 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
     : {};
   const artifactsPresent = Array.isArray(manifestValue.artifacts);
   const artifacts = (artifactsPresent ? manifestValue.artifacts : []) as Array<Record<string, unknown>>;
+  const entity = entities[index] as Record<string, unknown>;
+  const currentSlot = input.depictionIndex === null
+    ? entity.model3d
+    : Array.isArray(entity.depictions)
+      ? (entity.depictions[input.depictionIndex ?? -1] as Record<string, unknown> | undefined)?.model3d
+      : undefined;
+  let protectedArtifact: { artifact: Record<string, unknown>; index: number } | null = null;
+  if (input.protectGeneratedCurrent) {
+    const current = artifacts
+      .map((artifact, artifactIndex) => ({ artifact, index: artifactIndex }))
+      .filter(({ artifact }) => inGroup(artifact, input.entityId) && artifact.current === true);
+    if (
+      current.length !== 1
+      || current[0]!.artifact.source !== 'worker_generated'
+      || current[0]!.artifact.selectionAuthority === 'human'
+      || !currentSlot
+      || typeof currentSlot !== 'object'
+      || Array.isArray(currentSlot)
+      || (currentSlot as Record<string, unknown>).source !== 'generated'
+      || (currentSlot as Record<string, unknown>).versionId !== current[0]!.artifact.versionId
+    ) {
+      throw new Error('current model3d is no longer machine-generated; refusing bbox sync overwrite');
+    }
+    protectedArtifact = current[0]!;
+  }
 
   const { versionId, supersedesId } = nextTakeLineage(artifacts, input.entityId, input.jobId ?? null);
 
@@ -120,15 +150,19 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
 
   const manifestOps = [
     ...(artifactsPresent ? [] : [{ op: 'add' as const, path: '/artifacts', value: [] as unknown }]),
+    ...(protectedArtifact
+      ? [{
+          op: 'test' as const,
+          path: `/artifacts/${protectedArtifact.index}`,
+          value: protectedArtifact.artifact,
+        }]
+      : []),
     ...unsetOps,
     { op: 'add' as const, path: '/artifacts/-', value: take },
   ];
 
   // The entity slot mirrors the current take. `add` (not `replace`) so the first write
   // succeeds even though the slot key does not exist yet (strict RFC6902 replace would fail).
-  const pointer = input.depictionIndex === null
-    ? `/${index}/model3d`
-    : `/${index}/depictions/${input.depictionIndex}/model3d`;
   const slot = {
     status: 'ready',
     uri: input.assetUri,
@@ -140,9 +174,11 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
     filename: input.assetUri.split('/').pop() || `${input.entityId}.glb`,
   };
 
-  const entity = entities[index] as Record<string, unknown>;
   const currentPreviz = entity.previzModel;
-  const ledgerOperations: Array<{ op: 'add'; path: string; value: unknown }> = [
+  const ledgerOperations: Array<{ op: 'add' | 'test'; path: string; value: unknown }> = [
+    ...(input.protectGeneratedCurrent
+      ? [{ op: 'test' as const, path: pointer, value: currentSlot }]
+      : []),
     { op: 'add', path: pointer, value: slot },
   ];
   if (

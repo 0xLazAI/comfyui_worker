@@ -75,13 +75,20 @@ describe('hydrateThreeView3dPayload', () => {
     const p = hydrateThreeView3dPayload(
       {
         turnaround: { assetUri: 'assets://x/sheet.png' },
-        target: { ...target, bboxM: [0.7, 1.8, 1.1], physicalInputHash, physicalInput },
+        target: {
+          ...target,
+          bboxM: [0.7, 1.8, 1.1],
+          physicalInputHash,
+          physicalInput,
+          protectGeneratedCurrent: true,
+        },
       },
       ctx,
     );
 
     expect(p.physicalInputHash).toBe(physicalInputHash);
     expect(p.physicalInput).toEqual(physicalInput);
+    expect(p.protectGeneratedCurrent).toBe(true);
     expect(p.scalePolicy).toBe('articulated_height');
   });
 

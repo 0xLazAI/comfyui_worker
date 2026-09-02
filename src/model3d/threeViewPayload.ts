@@ -60,6 +60,7 @@ export interface NormalizedThreeView3dPayload {
   bboxM: [number, number, number] | null;
   physicalInputHash: string | null;
   physicalInput: Record<string, unknown> | null;
+  protectGeneratedCurrent: boolean;
   scalePolicy: MetricScalePolicy;
   preset: ModelingPreset;
   seed: number | null;
@@ -89,6 +90,10 @@ export function hydrateThreeView3dPayload(
   const bboxM = normalizeBboxM(targetObj.bboxM);
   const physicalInputHash = normalizePhysicalInputHash(targetObj.physicalInputHash);
   const physicalInput = normalizePhysicalInput(targetObj.physicalInput, target.entityId);
+  const protectGeneratedCurrent = optionalBoolean(
+    targetObj.protectGeneratedCurrent,
+    'payload.target.protectGeneratedCurrent',
+  );
   const scalePolicy: MetricScalePolicy =
     target.entityKind === 'character' ? 'articulated_height' : 'rigid_bbox';
   const preset = normalizePreset(payload.preset);
@@ -104,11 +109,18 @@ export function hydrateThreeView3dPayload(
     bboxM,
     physicalInputHash,
     physicalInput,
+    protectGeneratedCurrent,
     scalePolicy,
     preset,
     seed,
     maxFaces,
   };
+}
+
+function optionalBoolean(value: unknown, path: string): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== 'boolean') throw new ValidationError(`${path} must be a boolean`);
+  return value;
 }
 
 function normalizePhysicalInputHash(value: unknown): string | null {

@@ -231,6 +231,31 @@ describe('registerEntityModel3d', () => {
       }),
     ).rejects.toThrow(/char_missing not found/);
   });
+
+  it('refuses to replace an uploaded current model during bbox sync', async () => {
+    setup(
+      {
+        artifacts: [{
+          kind: 'asset_model3d', ref: 'char_yan', versionId: 'manual-v1',
+          contentHash: 'b'.repeat(64), current: true, uri: 'assets://manual.glb',
+          source: 'uploaded', selectionAuthority: 'human',
+        }],
+      },
+      [{
+        id: 'char_yan',
+        model3d: { status: 'ready', uri: 'assets://manual.glb', source: 'uploaded', versionId: 'manual-v1' },
+      }],
+    );
+
+    await expect(
+      registerEntityModel3d({
+        projectId: 'proj_1', entityKind: 'character', entityId: 'char_yan',
+        depictionIndex: null, assetUri: 'assets://late-worker.glb', contentHash: MODEL_HASH,
+        protectGeneratedCurrent: true,
+      }),
+    ).rejects.toThrow(/no longer machine-generated/);
+    expect(mockWrite).not.toHaveBeenCalled();
+  });
 });
 
 describe('readEntityBboxM', () => {

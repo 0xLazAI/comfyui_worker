@@ -58,7 +58,7 @@ export interface PaceWriteBatchInput {
   patches?: Array<{
     path: string;
     operations: Array<{
-      op: 'ADD' | 'REPLACE' | 'REMOVE' | 'add' | 'replace' | 'remove';
+      op: 'ADD' | 'REPLACE' | 'REMOVE' | 'TEST' | 'add' | 'replace' | 'remove' | 'test';
       path: string;
       value?: unknown;
     }>;
@@ -570,9 +570,14 @@ function normalizePacePatches(patches: PaceWriteBatchInput['patches']): PaceWrit
   }));
 }
 
-function normalizePatchOp(op: PacePatchOperation['op']): 'ADD' | 'REPLACE' | 'REMOVE' {
+function normalizePatchOp(op: PacePatchOperation['op']): 'ADD' | 'REPLACE' | 'REMOVE' | 'TEST' {
   const normalized = String(op || '').trim().toUpperCase();
-  if (normalized === 'ADD' || normalized === 'REPLACE' || normalized === 'REMOVE') {
+  if (
+    normalized === 'ADD'
+    || normalized === 'REPLACE'
+    || normalized === 'REMOVE'
+    || normalized === 'TEST'
+  ) {
     return normalized;
   }
   throw new PaiPlatformApiError(`Unsupported PACE patch op: ${op}`, 500, 'unsupported_pace_patch_op');
