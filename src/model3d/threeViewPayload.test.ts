@@ -64,6 +64,40 @@ describe('hydrateThreeView3dPayload', () => {
     expect(p.bboxM).toEqual([6, 6, 1]);
   });
 
+  it('hydrates the frozen physical identity and chooses articulated scaling for characters', () => {
+    const physicalInputHash = 'a'.repeat(64);
+    const physicalInput = {
+      schemaVersion: 'asset-physical-input-v1',
+      entityKind: 'creature',
+      entityId: 'char_yan',
+      bboxM: [0.7, 1.8, 1.1],
+    };
+    const p = hydrateThreeView3dPayload(
+      {
+        turnaround: { assetUri: 'assets://x/sheet.png' },
+        target: { ...target, bboxM: [0.7, 1.8, 1.1], physicalInputHash, physicalInput },
+      },
+      ctx,
+    );
+
+    expect(p.physicalInputHash).toBe(physicalInputHash);
+    expect(p.physicalInput).toEqual(physicalInput);
+    expect(p.scalePolicy).toBe('articulated_height');
+  });
+
+  it('uses rigid bbox scaling for props and locations', () => {
+    for (const entityKind of ['prop', 'location'] as const) {
+      const p = hydrateThreeView3dPayload(
+        {
+          turnaround: { assetUri: 'assets://x/sheet.png' },
+          target: { entityKind, entityId: `${entityKind}_x`, bboxM: [1, 2, 3] },
+        },
+        ctx,
+      );
+      expect(p.scalePolicy).toBe('rigid_bbox');
+    }
+  });
+
   it('defaults bboxM to null when absent, malformed, or non-positive', () => {
     const sheet = { assetUri: 'assets://x/sheet.png' };
     for (const bboxM of [undefined, [6, 6], [6, 6, 1, 1], [6, 0, 1], [6, 'x', 1]]) {

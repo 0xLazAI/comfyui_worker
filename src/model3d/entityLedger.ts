@@ -33,6 +33,8 @@ export interface RegisterModel3dInput {
   assetUri: string;
   /** SHA-256 of the exact GLB bytes uploaded to asset storage. */
   contentHash: string;
+  /** Frozen asset-physical-input-v1 digest consumed by this model. */
+  physicalInputHash?: string | null;
   /** Human-readable producer tag, e.g. "pailang:hunyuan3d_mv". */
   backend?: string;
   /** Upstream modeling job id (for take lineage disambiguation / audit). */
@@ -58,6 +60,9 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
   const now = input.now ?? new Date().toISOString();
   if (!/^[0-9a-f]{64}$/.test(input.contentHash)) {
     throw new Error('model3d contentHash must be a lowercase SHA-256 digest');
+  }
+  if (input.physicalInputHash != null && !/^[0-9a-f]{64}$/.test(input.physicalInputHash)) {
+    throw new Error('model3d physicalInputHash must be a lowercase SHA-256 digest');
   }
 
   // Resolve the entity's index in its ledger array.
@@ -102,6 +107,7 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
     selectionAuthority: 'automatic',
     status: 'ready',
     mediaType: MODEL3D_MEDIA_TYPE,
+    ...(input.physicalInputHash ? { physicalInputHash: input.physicalInputHash } : {}),
   };
   if (input.backend) take.backend = input.backend;
   if (input.jobId) take.jobId = input.jobId;
@@ -174,16 +180,14 @@ export async function registerEntityModel3d(input: RegisterModel3dInput): Promis
 }
 
 /**
- * Read a PROP's intrinsic `physicalAttributes.bboxM` (meters) from its ledger,
+ * Read an entity's intrinsic `physicalAttributes.bboxM` (meters) from its ledger,
  * for the metric bake.
  *
- * **Prop-only by design.** A character's size authority is single-axis `heightM`
- * (prop-3d-size proposal §4.5); PACE lets a character carry an optional `bboxM`,
- * but a per-axis metric bake on a character would distort it worse than the
- * height-normalized path — so characters always return null here, structurally,
- * not by relying on their data happening to omit bboxM.
+ * Characters and creatures consume the same bbox but downstream choose an
+ * articulated-height policy, so reading three axes here never authorizes a
+ * non-uniform character stretch.
  *
- * Returns null when: the kind isn't a prop; the prop has no valid bboxM; or the
+ * Returns null when the entity has no valid bboxM or the
  * ledger read FAILS. A read failure is logged (distinct from a genuine absence)
  * so a silent "wanted metric → got normalized" downgrade stays diagnosable, but
  * it never blocks modeling. Axis order is PACE std-2b `[width, depth, height]`
@@ -195,7 +199,6 @@ export async function readEntityBboxM(input: {
   entityKind: EntityKind;
   entityId: string;
 }): Promise<[number, number, number] | null> {
-  if (input.entityKind !== 'prop') return null;
   const ledgerPath = ENTITY_FILE[input.entityKind];
   if (!ledgerPath) return null;
 
@@ -204,7 +207,7 @@ export async function readEntityBboxM(input: {
     ledgerFile = await paiPlatformClient.readPaceFile(input.projectId, ledgerPath);
   } catch (err) {
     logger.warn(
-      'readEntityBboxM: ledger read failed, prop uses normalized GLB — project=%s entity=%s: %s',
+      'readEntityBboxM: ledger read failed, entity uses normalized GLB — project=%s entity=%s: %s',
       input.projectId, input.entityId, err instanceof Error ? err.message : String(err),
     );
     return null;

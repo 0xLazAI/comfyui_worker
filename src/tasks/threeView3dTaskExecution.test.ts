@@ -24,7 +24,10 @@ import {
   PaiPlatformApiError,
   paiPlatformClient,
 } from '../platform/paiPlatformClient.js';
-import { initializeGeneratedModelPlacement } from './threeView3dTaskExecution.js';
+import {
+  initializeGeneratedModelPlacement,
+  validateMetricModelResult,
+} from './threeView3dTaskExecution.js';
 
 const input = {
   projectId: 'project-1',
@@ -113,5 +116,22 @@ describe('initializeGeneratedModelPlacement', () => {
       code: 'support_anchor_initialization_failed',
       message: 'Platform unavailable',
     });
+  });
+});
+
+describe('validateMetricModelResult', () => {
+  it('rejects an articulated model whose generated width/depth miss the requested envelope', () => {
+    expect(() =>
+      validateMetricModelResult(
+        'articulated_height',
+        { proportion_within_tolerance: false },
+      ),
+    ).toThrow(/proportions do not match/i);
+  });
+
+  it('does not impose articulated proportion QA on rigid bbox models', () => {
+    expect(() =>
+      validateMetricModelResult('rigid_bbox', { proportion_within_tolerance: false }),
+    ).not.toThrow();
   });
 });

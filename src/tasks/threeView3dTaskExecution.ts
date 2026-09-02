@@ -22,6 +22,7 @@ import {
   hydrateThreeView3dPayload,
   THREE_VIEW_3D_CONSUMER_KEY,
   type NormalizedThreeView3dPayload,
+  type MetricScalePolicy,
   type ViewSlot,
 } from '../model3d/threeViewPayload.js';
 import { logger } from '../infra/logger.js';
@@ -38,6 +39,20 @@ export { THREE_VIEW_3D_CONSUMER_KEY };
 
 const TERMINAL_SUCCESS = new Set(['done', 'succeeded', 'success', 'completed']);
 const TERMINAL_FAILURE = new Set(['failed', 'error', 'rejected', 'cancelled', 'canceled']);
+
+export function validateMetricModelResult(
+  scalePolicy: MetricScalePolicy,
+  dimensions: Record<string, unknown> | null,
+): void {
+  if (
+    scalePolicy === 'articulated_height'
+    && dimensions?.proportion_within_tolerance === false
+  ) {
+    throw new ValidationError(
+      'generated articulated model proportions do not match the requested asset bbox',
+    );
+  }
+}
 
 interface ExecContext {
   attemptNo: number;
@@ -184,21 +199,18 @@ async function submitModelingTask(
     viewPaths[slot] = await uploadModelingView(slot, image.filename, image.buffer, image.contentType);
   }
 
-  // Forward the prop's real bboxM (meters) so the studio bakes true metric scale
-  // into the GLB (S4). Prop-only (a character's size authority is heightM, §4.5).
+  // Forward the entity's real bboxM (meters). The studio uses rigid per-axis
+  // baking for props/locations and uniform height scaling for characters.
   // PREFER the value the caller passed in the task payload — it's the explicit,
   // frontend-controlled source, so the frontend can drive metric baking without
   // waiting on the ledger/estimator; fall back to the entity ledger only when the
   // payload omits it. Absent in both → null → GLB stays normalized, previz fits.
-  const bboxM =
-    payload.target.entityKind !== 'prop'
-      ? null
-      : (payload.bboxM ??
-        (await readEntityBboxM({
-          projectId: payload.projectId,
-          entityKind: payload.target.entityKind,
-          entityId: payload.target.entityId,
-        })));
+  const bboxM = payload.bboxM ??
+    (await readEntityBboxM({
+      projectId: payload.projectId,
+      entityKind: payload.target.entityKind,
+      entityId: payload.target.entityId,
+    }));
 
   const submitted = await submitModelingJob({
     viewPaths,
@@ -206,6 +218,7 @@ async function submitModelingTask(
     seed: payload.seed,
     maxFaces: payload.maxFaces,
     bboxM,
+    scalePolicy: payload.scalePolicy,
   });
   const submittedAt = utcNow();
   const runtime = mergeHunyuan3dRuntimeState(null, {
@@ -400,6 +413,7 @@ async function finalizeModelingTask(
   status: ModelingStatusResult,
   context: ExecContext,
 ): Promise<void> {
+  validateMetricModelResult(payload.scalePolicy, status.dimensions);
   await taskStore.save({
     ...record,
     requestPayload: requestPayloadWithRuntime,
@@ -416,6 +430,16 @@ async function finalizeModelingTask(
   // Download the GLB, upload it to S3 as an ENTITY_MODEL_3D asset, then attach
   // its assets:// URI to the target entity's model3d slot in the ledger.
   const glb = await downloadModelingGlb(jobId);
+  if (payload.physicalInputHash) {
+    const currentBbox = await readEntityBboxM({
+      projectId: payload.projectId,
+      entityKind: payload.target.entityKind,
+      entityId: payload.target.entityId,
+    });
+    if (!sameBbox(currentBbox, payload.bboxM)) {
+      throw new ValidationError('asset physical dimensions changed before model registration');
+    }
+  }
   const uploaded = await uploadEntityModelAsset(payload.projectId, {
     buffer: glb,
     filenameHint: `${payload.target.entityId}.glb`,
@@ -427,6 +451,7 @@ async function finalizeModelingTask(
     depictionIndex: payload.target.depictionIndex,
     assetUri: uploaded.assetUri,
     contentHash: uploaded.contentHash,
+    physicalInputHash: payload.physicalInputHash,
     backend: `pailang:${HUNYUAN3D_MODELING_WORKFLOW}`,
     jobId,
   });
@@ -495,6 +520,13 @@ async function finalizeModelingTask(
     durationMs: Date.now() - new Date(context.startedAt).getTime(),
     resultPayload: result,
   });
+}
+
+function sameBbox(
+  left: [number, number, number] | null,
+  right: [number, number, number] | null,
+): boolean {
+  return left !== null && right !== null && left.every((value, index) => value === right[index]);
 }
 
 async function markModelingFailed(

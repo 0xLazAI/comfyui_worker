@@ -9,6 +9,7 @@ export const THREE_VIEW_3D_CONSUMER_KEY = 'hunyuan3d_three_view_consumer';
 
 export type ModelingPreset = 'fast' | 'standard';
 export type EntityKind = 'prop' | 'character' | 'location';
+export type MetricScalePolicy = 'rigid_bbox' | 'articulated_height';
 
 const VIEW_SLOTS = ['front', 'left', 'right', 'back'] as const;
 export type ViewSlot = (typeof VIEW_SLOTS)[number];
@@ -57,6 +58,9 @@ export interface NormalizedThreeView3dPayload {
    * the caller's responsibility.
    */
   bboxM: [number, number, number] | null;
+  physicalInputHash: string | null;
+  physicalInput: Record<string, unknown> | null;
+  scalePolicy: MetricScalePolicy;
   preset: ModelingPreset;
   seed: number | null;
   maxFaces: number | null;
@@ -83,6 +87,10 @@ export function hydrateThreeView3dPayload(
   // via its object umbrella; a bare top-level array field can't be declared).
   const targetObj = (payload.target ?? {}) as Record<string, unknown>;
   const bboxM = normalizeBboxM(targetObj.bboxM);
+  const physicalInputHash = normalizePhysicalInputHash(targetObj.physicalInputHash);
+  const physicalInput = normalizePhysicalInput(targetObj.physicalInput, target.entityId);
+  const scalePolicy: MetricScalePolicy =
+    target.entityKind === 'character' ? 'articulated_height' : 'rigid_bbox';
   const preset = normalizePreset(payload.preset);
   const seed = optionalInteger(payload.seed, 'payload.seed', 0);
   const maxFaces = optionalInteger(payload.maxFaces, 'payload.maxFaces', 1000);
@@ -94,10 +102,33 @@ export function hydrateThreeView3dPayload(
     views,
     target,
     bboxM,
+    physicalInputHash,
+    physicalInput,
+    scalePolicy,
     preset,
     seed,
     maxFaces,
   };
+}
+
+function normalizePhysicalInputHash(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) {
+    throw new ValidationError('payload.target.physicalInputHash must be a lowercase SHA-256');
+  }
+  return value;
+}
+
+function normalizePhysicalInput(value: unknown, entityId: string): Record<string, unknown> | null {
+  if (value === undefined || value === null) return null;
+  const snapshot = requireObject(value, 'payload.target.physicalInput');
+  if (
+    snapshot.schemaVersion !== 'asset-physical-input-v1'
+    || snapshot.entityId !== entityId
+  ) {
+    throw new ValidationError('payload.target.physicalInput identity is invalid');
+  }
+  return snapshot;
 }
 
 /** Parse an optional `bboxM` = `[width, depth, height]` meters. Absent/malformed/

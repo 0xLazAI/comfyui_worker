@@ -43,6 +43,7 @@ describe('registerEntityModel3d', () => {
       depictionIndex: null,
       assetUri: 'assets://new.glb',
       contentHash: MODEL_HASH,
+      physicalInputHash: 'f'.repeat(64),
       jobId: 'job_abcdef123',
     });
 
@@ -68,6 +69,7 @@ describe('registerEntityModel3d', () => {
       supersedesId: 'asset_take_1',
       versionId: 'asset_take_2_job_ab',
       contentHash: MODEL_HASH,
+      physicalInputHash: 'f'.repeat(64),
       source: 'worker_generated',
       selectionAuthority: 'automatic',
       status: 'ready',
@@ -246,17 +248,15 @@ describe('readEntityBboxM', () => {
     expect(mockRead).toHaveBeenCalledTimes(1);
   });
 
-  it('is prop-only: a CHARACTER with a bboxM still returns null (no ledger read)', async () => {
-    // §4.5 — character size authority is single-axis heightM; never per-axis
-    // bake a character even if its ledger carries an optional bboxM.
+  it('reads a CHARACTER bboxM so articulated modeling can scale by height and verify width/depth', async () => {
     mockRead.mockResolvedValue({
       value: [{ id: 'char_yan', physicalAttributes: { bboxM: [0.5, 0.3, 1.8], heightM: 1.8 } }],
     });
     const bbox = await readEntityBboxM({
       projectId: 'proj_1', entityKind: 'character', entityId: 'char_yan',
     });
-    expect(bbox).toBeNull();
-    expect(mockRead).not.toHaveBeenCalled();
+    expect(bbox).toEqual([0.5, 0.3, 1.8]);
+    expect(mockRead).toHaveBeenCalledWith('proj_1', 'entities/characters.json');
   });
 
   it('returns null when the prop has no bboxM, or it is malformed / non-positive', async () => {
