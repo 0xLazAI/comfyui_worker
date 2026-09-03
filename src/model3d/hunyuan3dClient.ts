@@ -2,7 +2,7 @@ import {
   HUNYUAN3D_MODELING_WORKFLOW,
   STEPHEN_RENDER_BASE_URL,
 } from '../infra/constants.js';
-import type { ViewSlot } from './threeViewPayload.js';
+import type { MetricScalePolicy, ViewSlot } from './threeViewPayload.js';
 
 export interface ModelingSubmitResult {
   jobId: string;
@@ -51,6 +51,7 @@ export async function submitModelingJob(input: {
   /** Prop's real `physicalAttributes.bboxM` = [width, depth, height] meters, or
    *  null. When set, the studio bakes true metric scale into the GLB (S4). */
   bboxM: [number, number, number] | null;
+  scalePolicy: MetricScalePolicy;
 }): Promise<ModelingSubmitResult> {
   const views: Record<string, { image_path: string }> = {};
   for (const [slot, imagePath] of Object.entries(input.viewPaths)) {
@@ -67,6 +68,7 @@ export async function submitModelingJob(input: {
   }
   if (input.bboxM !== null) {
     params.bbox_m = input.bboxM;
+    params.scale_policy = input.scalePolicy;
   }
 
   const response = await fetch(buildUrl('/api/modeling'), {
